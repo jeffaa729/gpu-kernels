@@ -10,5 +10,3 @@ profiles
 __pycache__
 *.o
 *.so
-data
-checkpoints

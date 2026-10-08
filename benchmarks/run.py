@@ -4,18 +4,17 @@ import importlib
 
 from common import measure, record, save_report, torch
 
-NATIVE = ("matmul", "grouped_gemm", "flash_attention", "mla")
-FAMILIES = NATIVE
+FAMILIES = ("matmul", "flash_attention")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("family", choices=(*FAMILIES, "all"),
-                        type=lambda x: {"gemm": "matmul", "moe": "grouped_gemm"}.get(x, x))
+                        type=lambda x: {"gemm": "matmul"}.get(x, x))
     parser.add_argument("--suite", choices=("quick", "full", "h100"), default="quick")
     parser.add_argument("--test", action="store_true", help="check native results against PyTorch; no timing")
-    parser.add_argument("--reference", help="pytorch, cublas, deepgemm, fa2, fa3, fa4, flashmla, both, or all")
-    parser.add_argument("--operation", help="run only this operation, such as forward, backward, or decode")
+    parser.add_argument("--reference", help="cublas for GEMM; pytorch, fa2, fa3, fa4, or all for FlashAttention")
+    parser.add_argument("--operation", help="run only TN GEMM or FlashAttention forward")
     parser.add_argument("--profile", action="store_true", help="one uncaptured call inside cudaProfilerStart/Stop")
     parser.add_argument("--backend", choices=("custom", "reference", "all"), default="all",
                         help="backend(s) to profile")

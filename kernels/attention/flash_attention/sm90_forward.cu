@@ -12,7 +12,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace dscuda {
+namespace gpu_kernels {
 namespace {
 
 using bf16 = __nv_bfloat16;
@@ -457,4 +457,4 @@ void flash_attention_forward_sm90_cuda(bf16* output, float* logsumexp, const bf1
     CUDA_CHECK(cudaGetLastError());
 }
 
-}  // namespace dscuda
+}  // namespace gpu_kernels

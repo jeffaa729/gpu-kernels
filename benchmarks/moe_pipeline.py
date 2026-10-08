@@ -18,17 +18,17 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 def swiglu_bridge():
-    library = ctypes.CDLL(str(ROOT / "build/libdscuda_moe_swiglu_bench.so"))
-    launch = library.dscuda_moe_swiglu
+    library = ctypes.CDLL(str(ROOT / "build/libgpu_kernels_moe_swiglu_bench.so"))
+    launch = library.gpu_kernels_moe_swiglu
     launch.argtypes = [ctypes.c_void_p] * 4 + [ctypes.c_int] * 2 + [ctypes.c_float, ctypes.c_void_p]
     launch.restype = ctypes.c_int
-    library.dscuda_moe_last_error.restype = ctypes.c_char_p
+    library.gpu_kernels_moe_last_error.restype = ctypes.c_char_p
 
     def call(output, gate_up, weights, valid_rows, clamp):
         status = launch(output.data_ptr(), gate_up.data_ptr(), weights.data_ptr(), valid_rows.data_ptr(),
                         gate_up.shape[0], output.shape[1], clamp, torch.cuda.current_stream().cuda_stream)
         if status:
-            raise RuntimeError(library.dscuda_moe_last_error().decode())
+            raise RuntimeError(library.gpu_kernels_moe_last_error().decode())
 
     return call
 

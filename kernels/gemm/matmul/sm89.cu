@@ -6,7 +6,7 @@
 #include <cuda_bf16.h>
 #include <stdexcept>
 
-namespace dscuda {
+namespace gpu_kernels {
 namespace {
 
 // FP32 hierarchical tiling: block 128x128, warp 64x32, thread 8x8.
@@ -550,4 +550,4 @@ void gemm_bf16_sm89_cuda(__nv_bfloat16* C, const __nv_bfloat16* A, const __nv_bf
     launch_tensor_core_matmul(C, A, B, M, N, K, stream);
 }
 
-}  // namespace dscuda
+}  // namespace gpu_kernels

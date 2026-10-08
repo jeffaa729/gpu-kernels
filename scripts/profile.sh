@@ -6,15 +6,14 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 build_dir="$repo_root/build"
 report_dir="$repo_root/profiles/reports"
 result_dir="$repo_root/profiles/results"
-python_bin="${DSCUDA_PYTHON:-$repo_root/.venv/bin/python}"
+python_bin="${GPU_KERNELS_PYTHON:-$repo_root/.venv/bin/python}"
 family="${1:-}"
-[[ "$family" != "moe" ]] || family=grouped_gemm
 [[ "$family" != "gemm" ]] || family=matmul
 suite="${2:-quick}"
 run_mode="${3:-profile}"
 
 usage() {
-    echo "usage: bash scripts/profile.sh {matmul|grouped_gemm|flash_attention|mla} [quick|full|h100] [profile|extract]" >&2
+    echo "usage: bash scripts/profile.sh {matmul|flash_attention} [quick|full|h100] [profile|extract]" >&2
 }
 
 if [[ "$family" == "--help" || "$family" == "-h" ]]; then
@@ -61,7 +60,7 @@ if [[ -z "$nvcc_bin" || -z "$ncu_bin" ]]; then
     exit 1
 fi
 
-cuda_arch="${DSCUDA_CUDA_ARCH:-}"
+cuda_arch="${GPU_KERNELS_CUDA_ARCH:-}"
 if [[ -z "$cuda_arch" ]] && command -v nvidia-smi >/dev/null; then
     cuda_arch="$(
         nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null \
@@ -73,25 +72,11 @@ cuda_arch="${cuda_arch:-89}"
 case "$family" in
     matmul)
         test_regex='^matmul$'
-        build_targets=(dscuda_operator_bench benchmark_matmul)
+        build_targets=(gpu_kernels_operator_bench benchmark_matmul)
         ;;
     flash_attention)
         test_regex='^flash_attention$'
-        build_targets=(dscuda_flash_attention_bench benchmark_flash_attention)
-        ;;
-    mla)
-        test_regex='^mla$'
-        build_targets=(
-            dscuda_mla_bench
-            benchmark_mla benchmark_mla_decode
-        )
-        ;;
-    grouped_gemm)
-        test_regex='^(expert_dispatch|grouped_gemm)$'
-        build_targets=(
-            dscuda_expert_dispatch_bench dscuda_operator_bench
-            benchmark_grouped_gemm
-        )
+        build_targets=(gpu_kernels_flash_attention_bench benchmark_flash_attention)
         ;;
     *)
         usage
@@ -100,7 +85,7 @@ case "$family" in
 esac
 
 mkdir -p "$build_dir"
-if ! CUDACXX="$nvcc_bin" DSCUDA_CUDA_ARCH="$cuda_arch" \
+if ! CUDACXX="$nvcc_bin" GPU_KERNELS_CUDA_ARCH="$cuda_arch" \
         bash "$repo_root/scripts/build.sh" "${build_targets[@]}" \
         >"$build_dir/${family}_build.log" 2>&1; then
     cat "$build_dir/${family}_build.log" >&2
@@ -133,11 +118,11 @@ flash_version="$(
     printf -- '- Nsight Compute: %s\n' "$ncu_version"
     printf -- '- CUDA architecture: sm_%s\n' "$cuda_arch"
     printf -- '- Build: CMake Release\n'
-    printf -- '- dscuda commit: %s\n' "$(git -C "$repo_root" rev-parse HEAD)"
+    printf -- '- gpu_kernels commit: %s\n' "$(git -C "$repo_root" rev-parse HEAD)"
     printf -- '- Shape suite: %s\n' "$suite"
     printf -- '- flash-attn package: %s\n' "$flash_version"
     printf -- '- flash-attn commit: %s\n' \
-        "${DSCUDA_FLASH_ATTN_COMMIT:-not recorded}"
+        "${GPU_KERNELS_FLASH_ATTN_COMMIT:-not recorded}"
 } >"$result_dir/${family}_environment.md"
 
 profile_case() {
@@ -188,15 +173,16 @@ profile_matmul() {
     local sizes=(2048)
     [[ "$suite" != "quick" ]] && sizes=(2048 4096 8192)
     local backends=(fp32 bf16 cublas_fp32 cublas_bf16)
+    [[ "$cuda_arch" != 90 && "$cuda_arch" != 90a ]] || backends=(bf16 cublas_bf16)
     local size backend pattern label stem
     for size in "${sizes[@]}"; do
         for backend in "${backends[@]}"; do
             pattern='regex:.*matmul_kernel.*'
             [[ "$backend" == "bf16" ]] && \
-                pattern='regex:.*matmul_tensor_core_.*kernel.*'
+                pattern='regex:.*(matmul_tensor_core_.*|gemm_bf16_)kernel.*'
             [[ "$backend" == cublas_* ]] && pattern='regex:.*'
-            label="M=${size},N=${size},K=${size}/${backend}/NN"
-            stem="${size}_${backend}_NN"
+            label="M=${size},N=${size},K=${size}/${backend}/TN"
+            stem="${size}_${backend}_TN"
             profile_case \
                 "$label" "$stem" "$pattern" \
                 "$build_dir/benchmark_matmul" \
@@ -227,7 +213,7 @@ profile_flash_attention() {
     local have_official=0
     if official_flash_available; then
         have_official=1
-    elif [[ "${DSCUDA_REQUIRE_EXTERNAL:-0}" == "1" ]]; then
+    elif [[ "${GPU_KERNELS_REQUIRE_EXTERNAL:-0}" == "1" ]]; then
         echo "PyTorch and the official flash-attn package are required" >&2
         exit 1
     else
@@ -242,8 +228,8 @@ profile_flash_attention() {
         stem="B${batch}_T${sequence}_H${heads}_D${dimension}"
 
         if (( have_official )); then
-            custom_dump="${TMPDIR:-/tmp}/dscuda_${stem}_custom.bin"
-            official_dump="${TMPDIR:-/tmp}/dscuda_${stem}_official.bin"
+            custom_dump="${TMPDIR:-/tmp}/gpu_kernels_${stem}_custom.bin"
+            official_dump="${TMPDIR:-/tmp}/gpu_kernels_${stem}_official.bin"
             "$build_dir/benchmark_flash_attention" \
                 "$batch" "$sequence" "$heads" "$dimension" forward \
                 "$custom_dump" >/dev/null
@@ -278,58 +264,9 @@ profile_flash_attention() {
     done
 }
 
-profile_mla() {
-    local sequences=(128)
-    [[ "$suite" != "quick" ]] && sequences=(128 256 512)
-    local sequence
-    for sequence in "${sequences[@]}"; do
-        profile_case \
-            "B=1,T=${sequence},H=8,D=512,R=64/custom/forward_backward" \
-            "T${sequence}_forward_backward" \
-            'regex:mla_(forward|query_backward|kv_backward)_kernel' \
-            "$build_dir/benchmark_mla" 1 "$sequence" 8 512 64
-        profile_case \
-            "B=2,KV=${sequence},H=16,D=512,R=64/custom/decode" \
-            "KV${sequence}_decode" 'regex:mla_decode_(split|combine)_kernel' \
-            "$build_dir/benchmark_mla_decode" 2 "$sequence" 16 512 64 8
-    done
-}
-
-profile_grouped_gemm() {
-    local cases=("512 8 256 512")
-    [[ "$suite" != "quick" ]] && cases=(
-        "4096 8 512 1536"
-        "8192 16 512 1536"
-    )
-    local case_spec rows experts input_size output_size
-    local distribution backend label stem pattern label_backend
-    for case_spec in "${cases[@]}"; do
-        read -r rows experts input_size output_size <<<"$case_spec"
-        for distribution in uniform hot empty; do
-            for backend in custom cublas; do
-                pattern='regex:grouped_linear_bf16_tensor_core_kernel'
-                label_backend=custom_bf16
-                if [[ "$backend" == "cublas" ]]; then
-                    pattern='regex:.*'
-                    label_backend=cublas_bf16
-                fi
-                label="M=${rows},E=${experts},K=${input_size},N=${output_size},load=${distribution}/${label_backend}/NN"
-                stem="M${rows}_E${experts}_K${input_size}_N${output_size}_${distribution}_${backend}"
-                profile_case \
-                    "$label" "$stem" "$pattern" \
-                    "$build_dir/benchmark_grouped_gemm" \
-                    "$rows" "$experts" "$input_size" "$output_size" \
-                    "$distribution" "$backend"
-            done
-        done
-    done
-}
-
 case "$family" in
     matmul) profile_matmul ;;
     flash_attention) profile_flash_attention ;;
-    mla) profile_mla ;;
-    grouped_gemm) profile_grouped_gemm ;;
 esac
 
 "$python_bin" "$repo_root/scripts/extract_ncu.py" \

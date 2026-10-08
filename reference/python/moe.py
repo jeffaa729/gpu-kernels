@@ -1,22 +1,7 @@
-"""Small forward-only MoE oracle and grouped-GEMM benchmark reference."""
+"""Small BF16 forward oracle for the distributed MegaMoE baseline."""
 
 import torch
 import torch.nn.functional as F
-
-from .attention import compute
-
-
-def grouped_gemm(x, weights, offsets):
-    """Reference for packed [M,K] @ [E,K,N] weights in expert order."""
-    if isinstance(offsets, torch.Tensor):
-        raise TypeError("prepare offsets as a host tuple outside the measured call")
-    x, weights = compute(x), compute(weights)
-    return torch.cat(
-        [x[begin:end] @ weights[e]
-         for e, (begin, end) in enumerate(zip(offsets[:-1], offsets[1:]))],
-        dim=0,
-    )
-
 
 @torch.no_grad()
 def moe_forward(x, expert_ids, route_weights, w1, w2, clamp=10.0):

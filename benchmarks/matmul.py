@@ -12,14 +12,14 @@ def cases(args, family):
         raise ValueError("GEMM reference: cublas")
 
     lib = library("operator")
-    checked(lib, "operator", bind(lib, "dscuda_cublas_init", [])())
-    gemm = bind(lib, "dscuda_gemm", [P] * 3 + [I] * 5 + [P])
+    checked(lib, "operator", bind(lib, "gpu_kernels_cublas_init", [])())
+    gemm = bind(lib, "gpu_kernels_gemm", [P] * 3 + [I] * 5 + [P])
     dtypes = (torch.bfloat16,) if is_sm90 else (torch.float32, torch.bfloat16)
 
     try:
         for dtype in dtypes:
             if args.test and dtype == torch.bfloat16 and is_sm90:
-                # Matmul7: one wave, persistent reuse, and cross-tile queue wraps.
+                # Exercise persistent reuse and cross-tile queue wraps.
                 shapes = ((2048, 2048, 64), (2048, 4096, 192),
                           (4096, 2048, 256))
             elif args.test:
@@ -36,7 +36,7 @@ def cases(args, family):
                 right = torch.randn((n, k), device="cuda", dtype=dtype) * .1
                 right = right.t()  # Logical B[K,N], physical [N,K].
                 expected = (left.float() @ right.float()).to(dtype)
-                # An empty/incomplete SM90 kernel must fail correctness before timing.
+                # NaN initialization catches unwritten output elements before timing.
                 custom_output = torch.full((n, m), float("nan"), device="cuda", dtype=dtype)
                 custom_output = custom_output.t()  # Column-major C[M,N].
 
@@ -60,4 +60,4 @@ def cases(args, family):
                     "bf16" if dtype == torch.bfloat16 else "fp32",
                     "TN", functions, (expected,), tolerance, tolerance)
     finally:
-        bind(lib, "dscuda_cublas_destroy", [], None)()
+        bind(lib, "gpu_kernels_cublas_destroy", [], None)()

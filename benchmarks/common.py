@@ -17,7 +17,7 @@ P, I, F = ctypes.c_void_p, ctypes.c_int, ctypes.c_float
 
 
 def library(name):
-    return ctypes.CDLL(str(ROOT / "build" / f"libdscuda_{name}_bench.so"))
+    return ctypes.CDLL(str(ROOT / "build" / f"libgpu_kernels_{name}_bench.so"))
 
 
 def bind(lib, name, signature, result=I):
@@ -28,7 +28,7 @@ def bind(lib, name, signature, result=I):
 
 def checked(lib, prefix, status):
     if status:
-        error = bind(lib, f"dscuda_{prefix}_last_error", [], ctypes.c_char_p)
+        error = bind(lib, f"gpu_kernels_{prefix}_last_error", [], ctypes.c_char_p)
         raise RuntimeError(error().decode())
 
 
@@ -53,11 +53,10 @@ class Operation:
     expected: tuple | None
     atol: float = 2e-4
     rtol: float = 2e-3
-    normalize: object = None
 
     def check(self, result):
         if self.expected is not None:
-            actual = tensors(self.normalize(result) if self.normalize else result)
+            actual = tensors(result)
             assert len(actual) == len(self.expected)
             for index, (output, expected) in enumerate(zip(actual, self.expected)):
                 atol = self.atol[index] if isinstance(self.atol, tuple) else self.atol

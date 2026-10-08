@@ -83,7 +83,7 @@ nvtx = [
 ]
 
 [[package]]
-name = "dscuda-kernel-tools"
+name = "gpu-kernels"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [

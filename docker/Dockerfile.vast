@@ -6,7 +6,7 @@ ARG DEEPGEMM_REF=559d79fb6994a58b8a15b4b93bf13ccc16edf247
 ENV DEBIAN_FRONTEND=noninteractive
 ENV UV_LINK_MODE=copy
 ENV UV_TOOL_BIN_DIR=/usr/local/bin
-ENV DSCUDA_PYTHON=/opt/dscuda-env/.venv/bin/python
+ENV GPU_KERNELS_PYTHON=/opt/gpu-kernels-env/.venv/bin/python
 ENV PATH="/usr/local/bin:${PATH}"
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
@@ -28,7 +28,7 @@ COPY --from=ghcr.io/astral-sh/uv:0.12.9 /uv /uvx /usr/local/bin/
 RUN uv tool install cmake==3.31.10
 
 # Cache Python dependencies separately from source code.
-WORKDIR /opt/dscuda-env
+WORKDIR /opt/gpu-kernels-env
 COPY pyproject.toml uv.lock ./
 RUN uv sync --locked --no-install-project
 
@@ -37,14 +37,12 @@ RUN uv sync --locked --no-install-project
 RUN git clone --filter=blob:none --no-checkout "${DEEPGEMM_REPOSITORY}" /tmp/DeepGEMM \
     && git -C /tmp/DeepGEMM checkout --detach "${DEEPGEMM_REF}" \
     && git -C /tmp/DeepGEMM submodule update --init --recursive \
-    && uv pip install --python "${DSCUDA_PYTHON}" setuptools wheel ninja packaging \
-    && uv pip install --python "${DSCUDA_PYTHON}" --no-build-isolation --no-deps /tmp/DeepGEMM \
-    && "${DSCUDA_PYTHON}" -c 'import deep_gemm; assert hasattr(deep_gemm, "m_grouped_bf16_gemm_nn_contiguous")' \
+    && uv pip install --python "${GPU_KERNELS_PYTHON}" setuptools wheel ninja packaging \
+    && uv pip install --python "${GPU_KERNELS_PYTHON}" --no-build-isolation --no-deps /tmp/DeepGEMM \
+    && "${GPU_KERNELS_PYTHON}" -c 'import deep_gemm; assert hasattr(deep_gemm, "m_grouped_bf16_gemm_nt_contiguous")' \
     && rm -rf /tmp/DeepGEMM
 
-# FA3 and FA4 are intentionally not built into this image. After cloning dscuda
-# on an H100 instance, install those Hopper-only references with:
-# bash scripts/install_hopper_flash_attention.sh
+# FA3 and FA4 are installed separately on an H100 instance.
 
 WORKDIR /root
 CMD ["/bin/bash"]

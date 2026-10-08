@@ -3,7 +3,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
-namespace dscuda {
+namespace gpu_kernels {
 
 // C = A * B: row-major A[M,K], column-major B[K,N] and C[M,N].
 // B is physically stored as contiguous [N,K], matching fast.cu.
@@ -28,4 +28,4 @@ void gemm_bf16_cuda(
     int K,
     cudaStream_t stream = nullptr);
 
-}  // namespace dscuda
+}  // namespace gpu_kernels

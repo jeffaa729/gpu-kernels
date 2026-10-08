@@ -3,7 +3,7 @@
 #include <cuda_bf16.h>
 #include <cuda_runtime.h>
 
-namespace dscuda {
+namespace gpu_kernels {
 
 // Fuses causal QK^T, online softmax, and PV without materializing the T x T
 // score or probability matrices. Q/O use BF16 [B,T,Hq,128], K/V use BF16
@@ -23,4 +23,4 @@ void flash_attention_forward_cuda(
     float scale,
     cudaStream_t stream = nullptr);
 
-}  // namespace dscuda
+}  // namespace gpu_kernels
