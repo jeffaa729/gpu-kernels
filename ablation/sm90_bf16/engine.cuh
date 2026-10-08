@@ -16,6 +16,24 @@ template <int Stage> struct Storage {
     alignas(ALIGNMENT) bf16 C[Stage == 8 ? BM * Config<Stage>::BN : 1];
 };
 
+#if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
+template <int Stage, int ScaleD>
+__device__ __forceinline__ void consume(Storage<Stage>& shared, uint64_t* full, uint64_t* empty,
+    float (&accumulator)[Config<Stage>::BN / 16][8], int consumer, int& stage, int& phase) {
+    barrier_wait(&full[stage], phase);
+    bf16* A = shared.A[stage] + consumer * 64 * BK;
+    warpgroup_fence();
+    multiply<Config<Stage>::BN, ScaleD>(accumulator, A, shared.B[stage]);
+#pragma unroll
+    for (int ki = 16; ki < BK; ki += 16) multiply<Config<Stage>::BN, 1>(accumulator, A + ki, shared.B[stage] + ki);
+    warpgroup_commit();
+    warpgroup_wait();
+    if constexpr (Stage == 1) __syncthreads();
+    else if (threadIdx.x % 128 == 0) barrier_arrive(&empty[stage]);
+    advance<Config<Stage>::STAGES>(stage, phase);
+}
+#endif
+
 // One sequence is independently traversed by every producer/consumer group.
 // The small-matrix group dimensions shrink instead of producing out-of-range tiles.
 template <int Stage> struct Scheduler {
@@ -91,7 +109,10 @@ __global__ __launch_bounds__(Config<Stage>::THREADS) void hopper_kernel(
                 for (int j = 0; j < 8; ++j) accumulator[i][j] = 0.f;
             }
         }
-        for (int k = 0; k < K; k += BK) {
+        // Peel the overwrite before the ordinary accumulate loop, matching
+        // production Kernel 9/10 without runtime ScaleD branches inside WGMMA.
+        if constexpr (Stage >= 7) consume<Stage, 0>(shared, full, empty, accumulator, consumer, stage, phase);
+        for (int k = Stage >= 7 ? BK : 0; k < K; k += BK) {
             if constexpr (Stage == 1) {
                 if (tid == 0) {
                     barrier_expect_bytes(&full[0], sizeof(shared.A[0]) + sizeof(shared.B[0]));
@@ -99,20 +120,7 @@ __global__ __launch_bounds__(Config<Stage>::THREADS) void hopper_kernel(
                     tma_load(shared.B[0], &B_map, &full[0], k, tile_n * BN);
                 }
             }
-            barrier_wait(&full[stage], phase);
-            bf16* A = shared.A[stage] + consumer * 64 * BK;
-            warpgroup_fence();
-            if constexpr (Stage >= 7) {
-                if (k == 0) multiply<BN, 0>(accumulator, A, shared.B[stage]);
-                else multiply<BN, 1>(accumulator, A, shared.B[stage]);
-            } else multiply<BN, 1>(accumulator, A, shared.B[stage]);
-#pragma unroll
-            for (int ki = 16; ki < BK; ki += 16) multiply<BN, 1>(accumulator, A + ki, shared.B[stage] + ki);
-            warpgroup_commit();
-            warpgroup_wait();
-            if constexpr (Stage == 1) __syncthreads();
-            else if (group_thread == 0) barrier_arrive(&empty[stage]);
-            advance<STAGES>(stage, phase);
+            consume<Stage, 1>(shared, full, empty, accumulator, consumer, stage, phase);
         }
 
         if constexpr (Stage == 8) {
@@ -167,4 +175,3 @@ void launch(bf16* C, const bf16* A, const bf16* B, int M, int N, int K, cudaStre
     hopper_kernel<Stage><<<blocks, Config<Stage>::THREADS, bytes, stream>>>(C, cm, am, bm, M, N, K);
 }
 } // namespace ablation::hopper
-
