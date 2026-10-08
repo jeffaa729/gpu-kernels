@@ -26,6 +26,33 @@ Hand-written CUDA kernels benchmarked against established libraries. Times are i
 
 - TMA loads/stores, WGMMA, three-stage shared-memory pipeline, persistent tile scheduling, shared-memory output epilogue.
 
+## GEMM ablation: analytical rooflines
+
+Each curve compares incremental kernel optimizations with cuBLAS. Throughput comes
+from measured CUDA Graph runtimes; arithmetic intensity uses minimum algorithmic
+IO, not measured DRAM traffic. The roofs use theoretical bandwidth and dense
+compute throughput at the sampled active GPU clock. Matrix sizes label cuBLAS
+points; these plots do not establish actual memory traffic or bottlenecks.
+
+### SM89: RTX 4060 Laptop
+
+FP32 stages F0-F7 and BF16 stages T0-T4 cover tiling, vectorized access, swizzling,
+and asynchronous pipelines, with square matrices from 256 to 8192. Stage files
+are in [`ablation/sm89_fp32/`](ablation/sm89_fp32/) and
+[`ablation/sm89_bf16/`](ablation/sm89_bf16/).
+
+![RTX 4060 Laptop analytical GEMM rooflines, FP32 and BF16 versus cuBLAS](assets/roofline/sm89_analytical.png)
+
+### SM90: H100
+
+BF16 stages H0-H8 cover TMA/WGMMA, warp specialization, register redistribution,
+persistent scheduling, L2-friendly scheduling, wider tiles, accumulator overwrite,
+and TMA output stores, with square matrices from 512 to 8192. Stage files are in
+[`ablation/sm90_bf16/`](ablation/sm90_bf16/). Some transitions change tile size and
+queue depth together; improvements are not necessarily monotonic.
+
+![H100 analytical BF16 GEMM roofline, incremental optimization stages versus cuBLAS](assets/roofline/sm90_analytical.png)
+
 ## FlashAttention forward
 
 [`kernels/attention/flash_attention/`](kernels/attention/flash_attention/) contains causal BF16, head-dimension-128 MHA/GQA/MQA kernels for SM89 and SM90. Latest reported RTX 4060 run: `B=1, T=512, Hq=8, D=128`.
