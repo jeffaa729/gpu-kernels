@@ -160,8 +160,8 @@ def main():
     args.output_dir = args.output_dir or ROOT / ("profiles/ablation_sm90" if hopper else "profiles/ablation")
     if hopper:
         args.ncu = "off"
-        if any(n % 256 for n in args.sizes):
-            raise ValueError("Hopper ablation sizes must be multiples of 256")
+        if any(n < 256 or n & (n - 1) for n in args.sizes):
+            raise ValueError("Hopper ablation sizes must be powers of two, starting at 256")
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
     lib = ctypes.CDLL(str(build / "libgemm_ablation.so"))
@@ -261,6 +261,7 @@ def main():
     clock = max(active)
     sm_count, reported_clock, memory_clock, bus = attributes
     metadata = dict(gpu=torch.cuda.get_device_name(), sm_count=sm_count, torch=torch.__version__, cuda=torch.version.cuda,
+                    git_commit=subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip(),
                     clock_assumption_mhz=clock, reported_clock_khz=reported_clock,
                     clock_basis="Maximum sampled SM clock while GPU utilization >=50%; theoretical ceiling at that clock, not sustained measured compute.",
                     fp32_peak_tflops=sm_count * 128 * 2 * clock / 1e6,
