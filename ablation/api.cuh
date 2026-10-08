@@ -13,6 +13,10 @@ DECLARE_FP32(4); DECLARE_FP32(5); DECLARE_FP32(6); DECLARE_FP32(7);
 #define DECLARE_BF16(Stage) void t##Stage(bf16* C, const bf16* A, const bf16* B, int M, int N, int K, cudaStream_t stream)
 DECLARE_BF16(0); DECLARE_BF16(1); DECLARE_BF16(2); DECLARE_BF16(3); DECLARE_BF16(4);
 #undef DECLARE_BF16
+#define DECLARE_HOPPER(Stage) void h##Stage(bf16* C, const bf16* A, const bf16* B, int M, int N, int K, cudaStream_t stream)
+DECLARE_HOPPER(0); DECLARE_HOPPER(1); DECLARE_HOPPER(2); DECLARE_HOPPER(3); DECLARE_HOPPER(4);
+DECLARE_HOPPER(5); DECLARE_HOPPER(6); DECLARE_HOPPER(7); DECLARE_HOPPER(8);
+#undef DECLARE_HOPPER
 }
 
 extern "C" int ablation_init();

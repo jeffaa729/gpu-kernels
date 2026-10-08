@@ -29,13 +29,22 @@ extern "C" int ablation_gemm(void* C, const void* A, const void* B, int M, int N
             check(cublasGemmEx(handle, CUBLAS_OP_T, CUBLAS_OP_N, M, N, K, &alpha, A, type, K, B, type, K, &beta, C, type, M,
                 bf16 ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F_PEDANTIC, bf16 ? CUBLAS_GEMM_DEFAULT_TENSOR_OP : CUBLAS_GEMM_DEFAULT));
         } else if (bf16) {
+#ifdef ABLATION_SM90
+            const ablation::BF16Launch launch[] = {ablation::h0, ablation::h1, ablation::h2, ablation::h3, ablation::h4, ablation::h5, ablation::h6, ablation::h7, ablation::h8};
+            if (stage < 0 || stage >= 9) throw std::invalid_argument("Hopper stage must be 0..8.");
+#else
             const ablation::BF16Launch launch[] = {ablation::t0, ablation::t1, ablation::t2, ablation::t3, ablation::t4};
             if (stage < 0 || stage >= 5) throw std::invalid_argument("BF16 stage must be 0..4.");
+#endif
             launch[stage](static_cast<ablation::bf16*>(C), static_cast<const ablation::bf16*>(A), static_cast<const ablation::bf16*>(B), M, N, K, stream);
         } else {
+#ifdef ABLATION_SM90
+            throw std::invalid_argument("Hopper ablation is BF16 only.");
+#else
             const ablation::FP32Launch launch[] = {ablation::f0, ablation::f1, ablation::f2, ablation::f3, ablation::f4, ablation::f5, ablation::f6, ablation::f7};
             if (stage < 0 || stage >= 8) throw std::invalid_argument("FP32 stage must be 0..7.");
             launch[stage](static_cast<float*>(C), static_cast<const float*>(A), static_cast<const float*>(B), M, N, K, stream);
+#endif
         }
         const auto status = cudaGetLastError();
         if (status != cudaSuccess) throw std::runtime_error(cudaGetErrorString(status));

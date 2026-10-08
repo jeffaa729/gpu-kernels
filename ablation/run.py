@@ -1,4 +1,4 @@
-"""Check and time all SM89 GEMM stages, collect optional DRAM counters, and plot."""
+"""Check and time SM89 or Hopper GEMM stages and plot their rooflines."""
 import argparse
 import csv
 import ctypes
@@ -22,6 +22,9 @@ from plot import plot_results
 FP32 = ["scalar", "shared tiling", "register tiling", "warp tiling + layout",
         "vector global", "vector shared + stores", "shared pipeline", "register pipeline"]
 BF16 = ["Tensor Core", "vector global", "XOR swizzle", "async copy", "async pipeline"]
+HOPPER = ["mma.sync baseline", "TMA + WGMMA (serial)", "warp-specialized pipeline",
+          "register redistribution", "persistent grid", "L2-friendly scheduling",
+          "wider 128x256 tile", "first WGMMA overwrite", "TMA output store"]
 
 
 class ClockSampler:
@@ -56,7 +59,7 @@ def arguments():
     parser.add_argument("--warmup-ms", type=float, default=150)
     parser.add_argument("--ncu", choices=["auto", "off", "required"], default="auto")
     parser.add_argument("--test-only", action="store_true")
-    parser.add_argument("--output-dir", type=Path, default=ROOT / "profiles/ablation")
+    parser.add_argument("--output-dir", type=Path)
     args = parser.parse_args()
     if any(n <= 0 or n % 128 for n in args.sizes):
         parser.error("sizes must be positive multiples of 128")
@@ -149,11 +152,19 @@ def profile(rows, args):
 @torch.no_grad()
 def main():
     args = arguments()
-    if torch.cuda.get_device_capability() != (8, 9):
-        raise RuntimeError("This local ablation suite targets SM89")
+    capability = torch.cuda.get_device_capability()
+    if capability not in [(8, 9), (9, 0)]:
+        raise RuntimeError("Ablation supports SM89 and SM90")
+    hopper = capability == (9, 0)
+    build = ROOT / ("build/ablation_sm90" if hopper else "build/ablation")
+    args.output_dir = args.output_dir or ROOT / ("profiles/ablation_sm90" if hopper else "profiles/ablation")
+    if hopper:
+        args.ncu = "off"
+        if any(n % 256 for n in args.sizes):
+            raise ValueError("Hopper ablation sizes must be multiples of 256")
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cuda.matmul.allow_bf16_reduced_precision_reduction = False
-    lib = ctypes.CDLL(str(ROOT / "build/ablation/libgemm_ablation.so"))
+    lib = ctypes.CDLL(str(build / "libgemm_ablation.so"))
     lib.ablation_gemm.argtypes = [ctypes.c_void_p] * 3 + [ctypes.c_int] * 5 + [ctypes.c_void_p]
     lib.ablation_copy.argtypes = [ctypes.c_void_p] * 2 + [ctypes.c_int, ctypes.c_void_p]
     lib.ablation_attributes.argtypes = [ctypes.POINTER(ctypes.c_int)]
@@ -168,9 +179,10 @@ def main():
     rows, all_samples, measured = [], {}, []
     checks = 0
     try:
-        for dtype, names in [(torch.float32, FP32), (torch.bfloat16, BF16)]:
+        suites = [(torch.bfloat16, HOPPER)] if hopper else [(torch.float32, FP32), (torch.bfloat16, BF16)]
+        for dtype, names in suites:
             dtype_name = "fp32" if dtype == torch.float32 else "bf16"
-            prefix = "F" if dtype == torch.float32 else "T"
+            prefix = "H" if hopper else ("F" if dtype == torch.float32 else "T")
             for n in args.sizes:
                 generator = torch.Generator(device="cuda").manual_seed(123 + n)
                 A = torch.randn((n, n), device="cuda", dtype=dtype, generator=generator) * .1
@@ -219,17 +231,19 @@ def main():
         del A, B, C, expected, operation
         torch.cuda.empty_cache()
 
-        # 128 MiB per buffer exceeds this device's L2 capacity; count both read and write.
-        src = torch.randn(32 * 1024 * 1024, device="cuda")
-        dst = torch.empty_like(src)
-        def copy():
-            checked(lib.ablation_copy(dst.data_ptr(), src.data_ptr(), src.numel() // 4, torch.cuda.current_stream().cuda_stream))
-            return dst
-        args.graph_operations = 1
-        copy_us = statistics.median(measure(Operation("128 MiB", "fp32", "copy", {"custom": copy}, (src,), 0, 0), args)["custom"])
-        copy_gbps = 2 * src.numel() * src.element_size() / copy_us / 1000
-        del src, dst
-        torch.cuda.empty_cache()
+        copy_gbps = None
+        if not hopper:
+            # 128 MiB per buffer exceeds L2 capacity; count both read and write.
+            src = torch.randn(32 * 1024 * 1024, device="cuda")
+            dst = torch.empty_like(src)
+            def copy():
+                checked(lib.ablation_copy(dst.data_ptr(), src.data_ptr(), src.numel() // 4, torch.cuda.current_stream().cuda_stream))
+                return dst
+            args.graph_operations = 1
+            copy_us = statistics.median(measure(Operation("128 MiB", "fp32", "copy", {"custom": copy}, (src,), 0, 0), args)["custom"])
+            copy_gbps = 2 * src.numel() * src.element_size() / copy_us / 1000
+            del src, dst
+            torch.cuda.empty_cache()
         save_csv(args.output_dir / "timings.csv", rows)
         report = table(rows)
         (args.output_dir / "timings.md").write_text(report)
@@ -250,7 +264,9 @@ def main():
                     clock_assumption_mhz=clock, reported_clock_khz=reported_clock,
                     clock_basis="Maximum sampled SM clock while GPU utilization >=50%; theoretical ceiling at that clock, not sustained measured compute.",
                     fp32_peak_tflops=sm_count * 128 * 2 * clock / 1e6,
-                    bf16_peak_tflops=sm_count * 512 * clock / 1e6,
+                    bf16_peak_tflops=sm_count * (4096 if hopper else 512) * clock / 1e6,
+                    stage_names={"bf16": HOPPER} if hopper else {"fp32": FP32, "bf16": BF16},
+                    stage_prefixes={"bf16": "H"} if hopper else {"fp32": "F", "bf16": "T"},
                     memory_clock_khz=memory_clock, memory_bus_bits=bus,
                     memory_peak_gbps=2 * memory_clock * 1000 * bus / 8 / 1e9,
                     measured_copy_gbps=copy_gbps, correctness_checks=checks, profiling=ncu_status,
@@ -259,9 +275,19 @@ def main():
                     timing="CUDA Graph replay; median; warmup, correctness, allocations and graph capture excluded.",
                     intensity="2MNK / (element_bytes*(MK+NK+MN)); minimum algorithmic IO, not measured DRAM traffic.",
                     limitations="F1->F2 changes block size along with register tiling; F2->F3 changes warp mapping and shared layout; F5 changes shared loads and stores together. Later stages hold tile sizes fixed. For K>2048, F0 uses 1M-element launch chunks and F1 uses 128-tile-row chunks for watchdog safety; graph timing includes all chunks, and Nsight counters/durations sum the cold-cache kernel replays. DRAM writes can remain in L2 at kernel completion, particularly for small matrices.",
-                    sources=["https://www.nvidia.com/en-us/geforce/laptops/compare/",
-                             "https://images.nvidia.com/aem-dam/Solutions/Data-Center/l4/nvidia-ada-gpu-architecture-whitepaper-v2.1.pdf"],
+                    sources=(["https://developer.nvidia.com/blog/nvidia-hopper-architecture-in-depth/",
+                              "https://cudaforfun.substack.com/p/outperforming-cublas-on-h100-a-worklog",
+                              "https://github.com/pranjalssh/fast.cu/tree/main/h100/matmul"] if hopper else
+                             ["https://www.nvidia.com/en-us/geforce/laptops/compare/",
+                              "https://images.nvidia.com/aem-dam/Solutions/Data-Center/l4/nvidia-ada-gpu-architecture-whitepaper-v2.1.pdf"]),
                     clocks=sampler.rows, samples=all_samples)
+    if hopper:
+        metadata["precision"] = "BF16 inputs/output; FP32 accumulation; TF32 disabled for FP32 correctness oracle."
+        metadata["limitations"] = ("H0->H1 jointly changes instruction family, copies, shared layout and BK (32->64); "
+            "H1->H2 adds warp specialization and a five-stage queue; H5->H6 changes BN (128->256) and stages (5->3). "
+            "Other transitions retain tile/queue dimensions. These are engineering stages, not one-variable causal experiments. "
+            "Arithmetic intensity uses ideal minimum IO, not hardware counters; it cannot establish actual memory traffic, L2 hits or bottlenecks. "
+            "Warm graph replays can reuse L2 data. The compute roof is a clock-scaled theoretical dense BF16 ceiling, not measured sustained throughput.")
     (args.output_dir / "environment.json").write_text(json.dumps(metadata, indent=2) + "\n")
     plot_results(rows, measured, metadata, args.output_dir)
     print(f"Passed {checks} GEMM checks. Plots: {args.output_dir}")

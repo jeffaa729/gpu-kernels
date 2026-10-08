@@ -21,8 +21,11 @@ def save(fig, output, name):
 
 
 def roofline(rows, metadata, output, measured=False):
-    fig, axes = plt.subplots(1, 2, figsize=(15, 7.8))
-    for ax, dtype, names in zip(axes, ["fp32", "bf16"], [FP32, BF16]):
+    dtypes = list(dict.fromkeys(r["dtype"] for r in rows))
+    fig, axes = plt.subplots(1, len(dtypes), figsize=(15 if len(dtypes) == 2 else 10, 7.8), squeeze=False)
+    for ax, dtype in zip(axes.flat, dtypes):
+        names = metadata.get("stage_names", {"fp32": FP32, "bf16": BF16})[dtype]
+        prefix = metadata.get("stage_prefixes", {"fp32": "F", "bf16": "T"})[dtype]
         selected = [r for r in rows if r["dtype"] == dtype]
         peak, bw = metadata[f"{dtype}_peak_tflops"], metadata["memory_peak_gbps"]
         xs = [float(r["intensity"]) for r in selected]
@@ -31,7 +34,7 @@ def roofline(rows, metadata, output, measured=False):
         x = np.geomspace(min(min(xs), ridge) / 4, max(max(xs), ridge) * 1.6, 300)
         ax.loglog(x, np.minimum(peak, bw * x / 1000), color="black", linewidth=2,
                   label=f"Theoretical roof: {peak:.1f} TFLOP/s, {bw:.0f} GB/s")
-        stages = [f'{"F" if dtype == "fp32" else "T"}{i}' for i in range(len(names))] + ["cuBLAS"]
+        stages = [f'{prefix}{i}' for i in range(len(names))] + ["cuBLAS"]
         colors = plt.get_cmap("tab10")
         for i, stage in enumerate(stages):
             points = sorted([r for r in selected if r["stage"] == stage], key=lambda r: int(r["size"]))
@@ -69,8 +72,9 @@ def roofline(rows, metadata, output, measured=False):
 def plot_results(rows, measured, metadata, output):
     roofline(rows, metadata, output)
     if measured: roofline(measured, metadata, output, True)
-    fig, axes = plt.subplots(1, 2, figsize=(15, 6))
-    for ax, dtype, names in zip(axes, ["fp32", "bf16"], [FP32, BF16]):
+    dtypes = list(dict.fromkeys(r["dtype"] for r in rows))
+    fig, axes = plt.subplots(1, len(dtypes), figsize=(15 if len(dtypes) == 2 else 10, 6), squeeze=False)
+    for ax, dtype in zip(axes.flat, dtypes):
         selected = [r for r in rows if r["dtype"] == dtype]
         n = max(int(r["size"]) for r in selected)
         points = [r for r in selected if int(r["size"]) == n]
