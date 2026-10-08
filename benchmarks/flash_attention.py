@@ -34,7 +34,7 @@ def load_reference_apis(reference):
 
 def cases(args, family):
     lib = library("flash_attention")
-    forward = bind(lib, "dscuda_flash_forward", [P] * 5 + [I] * 5 + [F, P])
+    forward = bind(lib, "gpu_kernels_flash_forward", [P] * 5 + [I] * 5 + [F, P])
     default_reference = "pytorch" if args.test else ("all" if args.suite == "h100" else "flash_attention_2")
     reference, reference_apis = load_reference_apis(args.reference or default_reference)
 

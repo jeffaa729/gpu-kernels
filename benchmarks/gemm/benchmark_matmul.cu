@@ -41,9 +41,9 @@ int main(int argc, char** argv) {
         const size_t output_elements = static_cast<size_t>(M) * N;
         const size_t element_bytes = bf16 ? sizeof(__nv_bfloat16) : sizeof(float);
         const size_t output_bytes = output_elements * element_bytes;
-        void* left = dscuda::device_malloc(left_elements * element_bytes);
-        void* right = dscuda::device_malloc(right_elements * element_bytes);
-        void* output = dscuda::device_malloc(output_bytes);
+        void* left = gpu_kernels::device_malloc(left_elements * element_bytes);
+        void* right = gpu_kernels::device_malloc(right_elements * element_bytes);
+        void* output = gpu_kernels::device_malloc(output_bytes);
         if (bf16) {
             const std::vector<__nv_bfloat16> a(left_elements, __float2bfloat16(0.5F));
             const std::vector<__nv_bfloat16> b(right_elements, __float2bfloat16(0.25F));
@@ -77,12 +77,12 @@ int main(int argc, char** argv) {
                     bf16 ? CUBLAS_COMPUTE_32F : CUBLAS_COMPUTE_32F_PEDANTIC,
                     bf16 ? CUBLAS_GEMM_DEFAULT_TENSOR_OP : CUBLAS_GEMM_DEFAULT));
             } else if (bf16) {
-                dscuda::gemm_bf16_cuda(
+                gpu_kernels::gemm_bf16_cuda(
                     static_cast<__nv_bfloat16*>(output),
                     static_cast<const __nv_bfloat16*>(left),
                     static_cast<const __nv_bfloat16*>(right), M, N, K);
             } else {
-                dscuda::gemm_fp32_cuda(
+                gpu_kernels::gemm_fp32_cuda(
                     static_cast<float*>(output),
                     static_cast<const float*>(left),
                     static_cast<const float*>(right), M, N, K);
@@ -90,18 +90,18 @@ int main(int argc, char** argv) {
         };
 
         run();
-        dscuda::synchronize();
+        gpu_kernels::synchronize();
         CUDA_CHECK(cudaMemset(output, 0, output_bytes));
-        dscuda::synchronize();
+        gpu_kernels::synchronize();
         CUDA_CHECK(cudaProfilerStart());
         run();
-        dscuda::synchronize();
+        gpu_kernels::synchronize();
         CUDA_CHECK(cudaProfilerStop());
 
         if (handle) cublas_check(cublasDestroy(handle));
-        dscuda::device_free(output);
-        dscuda::device_free(right);
-        dscuda::device_free(left);
+        gpu_kernels::device_free(output);
+        gpu_kernels::device_free(right);
+        gpu_kernels::device_free(left);
         return 0;
     } catch (const std::exception& error) {
         std::fprintf(stderr, "GEMM benchmark failed: %s\n", error.what());

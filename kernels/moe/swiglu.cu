@@ -6,7 +6,7 @@
 
 #include <cmath>
 
-namespace dscuda {
+namespace gpu_kernels {
 namespace {
 
 __global__ void moe_swiglu_kernel(__nv_bfloat16* output, const __nv_bfloat16* gate_up, const float* route_weights,
@@ -35,4 +35,4 @@ void moe_swiglu_bf16_cuda(__nv_bfloat16* output, const __nv_bfloat16* gate_up, c
     CUDA_CHECK(cudaGetLastError());
 }
 
-}  // namespace dscuda
+}  // namespace gpu_kernels

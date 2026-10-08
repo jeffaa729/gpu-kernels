@@ -5,7 +5,7 @@
 
 #include <stdexcept>
 
-namespace dscuda {
+namespace gpu_kernels {
 namespace flash_attention_sm89 {
 
 constexpr int WARP_SIZE = 32;
@@ -176,4 +176,4 @@ inline void validate_head_size(int head_size) {
 }
 
 }  // namespace flash_attention_sm89
-}  // namespace dscuda
+}  // namespace gpu_kernels

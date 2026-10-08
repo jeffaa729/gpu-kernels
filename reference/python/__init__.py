@@ -1,1 +1,1 @@
-"""Differentiable mathematical references and explicitly named library adapters."""
+"""Forward-only references for FlashAttention profiling and the MegaMoE baseline."""

@@ -1,15 +1,9 @@
 build/
 build-*/
 profiles/reports/
-data/
-checkpoints/
 __pycache__/
 *.pyc
 /profiles
 .venv/
-/docker/*
-!/docker/Dockerfile.vast
 /docs
-/tools
-/scripts/*
-!/scripts/benchmark_moe.sh
+.ruff_cache/

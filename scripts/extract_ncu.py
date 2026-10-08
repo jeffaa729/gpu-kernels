@@ -92,24 +92,18 @@ def short_kernel_name(full_name):
     patterns = (
         (r"flash_attention_forward(?:_tensor_core)?_kernel", "flash_fwd"),
         (r"flash_fwd", "official_flash_fwd"),
-        (r"grouped_linear_bf16_tensor_core_kernel", "grouped_gemm_bf16"),
-        (r"build_dispatch_map_kernel", "dispatch_map"),
-        (r"dispatch_copy_kernel", "dispatch_copy"),
-        (r"route_forward_kernel", "router_topk"),
-        (r"combine_forward_kernel", "expert_combine"),
     )
     for pattern, name in patterns:
         if re.search(pattern, full_name, re.IGNORECASE):
             return name
 
     if re.search(
-            r"matmul(?:_tensor_core(?:_mma|_edge)?)?_kernel", full_name):
-        return "matmul_NN"
+            r"(?:matmul(?:_tensor_core_mma)?|gemm_bf16)_kernel", full_name):
+        return "matmul_TN"
 
-    match = re.search(r"([a-z0-9_]+)_(forward|backward)_kernel", full_name)
+    match = re.search(r"([a-z0-9_]+)_forward_kernel", full_name)
     if match:
-        direction = "fwd" if match.group(2) == "forward" else "bwd"
-        return f"{match.group(1)}_{direction}"
+        return f"{match.group(1)}_fwd"
     match = re.search(r"([a-z0-9_]+)_kernel", full_name)
     if match:
         return match.group(1)
@@ -298,21 +292,16 @@ def result_table(summary, family=""):
         reference = "cuBLAS"
     elif "official" in backends or family == "flash_attention":
         reference = "FA-2"
-    elif backends & {"pytorch", "pytorch_unfused"}:
-        reference = "PyTorch unfused"
-    elif "flashmla" in backends:
-        reference = "FlashMLA"
     else:
         reference = "not measured"
 
     normalized = []
-    reference_backends = {"official", "cublas_fp32", "cublas_bf16",
-                          "pytorch", "pytorch_unfused", "flashmla"}
+    reference_backends = {"official", "cublas_fp32", "cublas_bf16"}
     for row in summary:
         backend = row["backend"]
         if backend in {"fp32", "cublas_fp32"}:
             dtype = "fp32"
-        elif backend in {"bf16", "custom_bf16", "cublas_bf16", "official"} or family in {"flash_attention", "mla"}:
+        elif backend in {"bf16", "custom_bf16", "cublas_bf16", "official"} or family == "flash_attention":
             dtype = "bf16"
         elif reference == "FA-2":
             dtype = "bf16"

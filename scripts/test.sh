@@ -2,7 +2,7 @@
 set -euo pipefail
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-python_bin="${DSCUDA_PYTHON:-$repo_root/.venv/bin/python}"
+python_bin="${GPU_KERNELS_PYTHON:-$repo_root/.venv/bin/python}"
 if [[ ! -x "$python_bin" ]]; then
     echo "Run uv sync --locked first." >&2
     exit 1

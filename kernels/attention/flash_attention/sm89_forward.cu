@@ -5,7 +5,7 @@
 
 #include <cfloat>
 
-namespace dscuda {
+namespace gpu_kernels {
 namespace flash_attention_sm89 {
 namespace tensor_core {
 
@@ -234,4 +234,4 @@ void flash_attention_forward_sm89_cuda(__nv_bfloat16* output, float* logsumexp, 
                                                       scale, stream);
 }
 
-}  // namespace dscuda
+}  // namespace gpu_kernels

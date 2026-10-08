@@ -10,16 +10,16 @@ namespace {
 thread_local std::string last_error;
 }
 
-extern "C" const char* dscuda_flash_last_error() {
+extern "C" const char* gpu_kernels_flash_last_error() {
     return last_error.c_str();
 }
 
-extern "C" int dscuda_flash_forward(
+extern "C" int gpu_kernels_flash_forward(
     __nv_bfloat16* output, float* logsumexp,
     const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv_bfloat16* value,
     int batch, int sequence, int query_heads, int key_value_heads, int dimension, float scale, cudaStream_t stream) {
     try {
-        dscuda::flash_attention_forward_cuda(
+        gpu_kernels::flash_attention_forward_cuda(
             output, logsumexp, query, key, value,
             batch, sequence, query_heads, key_value_heads, dimension, scale, stream);
         return 0;

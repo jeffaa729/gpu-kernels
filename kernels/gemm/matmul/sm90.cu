@@ -8,7 +8,7 @@
 #include <stdexcept>
 #include <string>
 
-namespace dscuda {
+namespace gpu_kernels {
 namespace {
 
 using bf16 = __nv_bfloat16;
@@ -393,4 +393,4 @@ void gemm_bf16_sm90_cuda(bf16* C, const bf16* A, const bf16* B, int M, int N, in
     CUDA_CHECK(cudaGetLastError());
 }
 
-}  // namespace dscuda
+}  // namespace gpu_kernels

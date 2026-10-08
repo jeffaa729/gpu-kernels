@@ -1,5 +1,5 @@
 [project]
-name = "dscuda-kernel-tools"
+name = "gpu-kernels"
 version = "0.1.0"
 description = "Standalone CUDA kernel correctness and library comparisons"
 requires-python = ">=3.10"

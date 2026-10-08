@@ -1,7 +1,7 @@
 #include "common.cuh"
 #include "cuda_common.h"
 
-namespace dscuda {
+namespace gpu_kernels {
 namespace {
 
 bool use_sm90() {
@@ -26,4 +26,4 @@ void flash_attention_forward_cuda(__nv_bfloat16* output, float* logsumexp, const
     }
 }
 
-}  // namespace dscuda
+}  // namespace gpu_kernels
