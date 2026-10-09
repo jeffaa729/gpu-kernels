@@ -41,7 +41,7 @@ and asynchronous pipelines, with square matrices from 256 to 8192. Stage files
 are in [`ablation/sm89_fp32/`](ablation/sm89_fp32/) and
 [`ablation/sm89_bf16/`](ablation/sm89_bf16/).
 
-![RTX 4060 Laptop analytical GEMM rooflines, FP32 and BF16 versus cuBLAS](assets/roofline/sm89_analytical.png)
+<img src="assets/roofline/sm89_analytical.png" alt="RTX 4060 Laptop analytical GEMM rooflines, FP32 and BF16 versus cuBLAS" width="800">
 
 ### SM90: H100
 
@@ -51,95 +51,40 @@ and TMA output stores, with square matrices from 512 to 8192. Stage files are in
 [`ablation/sm90_bf16/`](ablation/sm90_bf16/). Some transitions change tile size and
 queue depth together; improvements are not necessarily monotonic.
 
-![H100 analytical BF16 GEMM roofline, incremental optimization stages versus cuBLAS](assets/roofline/sm90_analytical.png)
+<img src="assets/roofline/sm90_analytical.png" alt="H100 analytical BF16 GEMM roofline, incremental optimization stages versus cuBLAS" width="800">
 
 ## FlashAttention forward
 
-[`kernels/attention/flash_attention/`](kernels/attention/flash_attention/) contains causal BF16, head-dimension-128 MHA/GQA/MQA kernels for SM89 and SM90. Latest reported RTX 4060 run: `B=1, T=512, Hq=8, D=128`.
+[`kernels/attention/flash_attention/`](kernels/attention/flash_attention/) contains causal BF16, head-dimension-128 MHA/GQA/MQA kernels for SM89 and SM90. Tables show MHA only. Latest reported RTX 4060 run: `B=1, T=512, Hq=Hkv=8, D=128`.
 
 | Hkv | custom µs | FlashAttention-2 µs | reference % |
 | ---: | ---: | ---: | ---: |
 | 8 (MHA) | 32.06 | 34.16 | 106.5 |
-| 2 (GQA) | 32.05 | 34.26 | 106.9 |
-| 1 (MQA) | 32.68 | 34.60 | 105.9 |
 
 - SM89: fused QK/online-softmax/PV, causal-tile specialization, `cp.async` prefetch, `ldmatrix`.
 - SM90: raw CUDA/PTX TMA/WGMMA forward; the optimized H100 results are below.
 
-### Optimized H100 against official FlashAttention
+### H100 MHA against official FlashAttention-4
 
-Measured on the same NVIDIA H100 80GB HBM3, using the unchanged 30-shape suite:
-`B ∈ {1,4}`, `T ∈ {128,256,512,1024,2048}`, `Hq=8`,
-`Hkv ∈ {8,2,1}`, `D=128`. All backends use causal BF16 inputs/output
-and FP32 natural-log LSE. CUDA Graph replay excludes setup and Python API latency;
-results are medians of 15 trials, after 1 second of warmup.
+Latest saved paired FA4 run on NVIDIA H100 80GB HBM3 (SXM): fixed `B=4`,
+`Hq=Hkv=8`, `D=128`. Both implementations use causal BF16 inputs/output
+and FP32 natural-log LSE. Times are medians of 15 trials
+after 1 second of warmup, measured with CUDA Graph replay; setup and Python
+API latency are excluded.
 
-The original kernel took 43.65 µs at `B=1,T=512,Hkv=8` and 980.52 µs at
-`B=4,T=2048,Hkv=8`. The optimized kernel takes 10.06 µs and 79.72 µs:
-approximately 4.3× and 12.3× faster on this H100.
-
-| size | dtype | operation | custom µs | reference (FA3) µs | reference % |
-| :--- | :--- | :--- | ---: | ---: | ---: |
-| B=1,T=512,Hkv=8 | BF16 | forward | 10.06 | 11.03 | 109.6 |
-| B=1,T=512,Hkv=2 | BF16 | forward | 9.90 | 10.90 | 110.1 |
-| B=1,T=512,Hkv=1 | BF16 | forward | 9.94 | 10.96 | 110.3 |
-| B=4,T=2048,Hkv=8 | BF16 | forward | 79.72 | 68.71 | 86.2 |
-| B=4,T=2048,Hkv=2 | BF16 | forward | 74.80 | 64.14 | 85.7 |
-| B=4,T=2048,Hkv=1 | BF16 | forward | 71.77 | 64.58 | 90.0 |
-
-The ≥95% FA3 throughput target is reached on **24/30 shapes**, not all shapes.
-The six `B=4,T≥1024` cases remain at 85.7–94.9%. Against FA2, all 30 cases
-exceed 100%; FA2 is not the performance target for the Hopper kernel.
-
-FA4's Hopper implementation is a separate reference, not its Blackwell kernel:
+This FA4 run uses an earlier kernel snapshot; the latest kernel has only
+been remeasured against FA3. Values below are from the same paired FA4 run,
+not a mixture of separate benchmarks.
 
 | size | dtype | operation | custom µs | reference (FA4) µs | reference % |
 | :--- | :--- | :--- | ---: | ---: | ---: |
-| B=1,T=512,Hkv=8 | BF16 | forward | 10.06 | 9.37 | 93.1 |
-| B=1,T=512,Hkv=2 | BF16 | forward | 9.90 | 9.26 | 93.5 |
-| B=1,T=512,Hkv=1 | BF16 | forward | 9.94 | 9.28 | 93.4 |
-| B=4,T=2048,Hkv=8 | BF16 | forward | 79.72 | 83.00 | 104.1 |
-| B=4,T=2048,Hkv=2 | BF16 | forward | 74.80 | 77.89 | 104.1 |
-| B=4,T=2048,Hkv=1 | BF16 | forward | 71.77 | 77.49 | 108.0 |
+| B=4,T=512,Hkv=8 | BF16 | forward | 10.47 | 9.79 | 93.5 |
+| B=4,T=1024,Hkv=8 | BF16 | forward | 25.44 | 24.69 | 97.0 |
+| B=4,T=2048,Hkv=8 | BF16 | forward | 83.69 | 81.94 | 97.9 |
+| B=4,T=4096,Hkv=8 | BF16 | forward | 275.05 | 273.11 | 99.3 |
+| B=4,T=8192,Hkv=8 | BF16 | forward | 1023.66 | 962.41 | 94.0 |
 
-FA4 throughput ratios span 92.2–108.0%; 13/30 cases reach ≥95%. These results
-do not establish uniform parity with either Hopper reference.
-
-### Source-traced Hopper implementation
-
-[`sm90_forward.cu`](kernels/attention/flash_attention/sm90_forward.cu) retains
-one fixed D128 kernel. Comments above each optimization identify its official
-file/function at commit
-[`94e22c9`](https://github.com/Dao-AILab/flash-attention/tree/94e22c906678e5483fa0e9e24d8e787bc2c0ed4c).
-
-- FA3 `tile_size.h`: 128×128 tiling; two consumer warp groups share K/V.
-- FA3 `mainloop_fwd_sm90_tma_gmma_ws.hpp`: independent two-stage K/V TMA
-  pipelines, QK shared/shared WGMMA, register/shared PV, and no BF16 V transpose.
-- FA3 `flash_fwd_kernel_sm90.h`: producer/consumer register redistribution
-  and descriptor prefetch. `mainloop::mma` supplies ping-pong scheduling and
-  the source-level QK(next)/PV(current)/softmax pipeline.
-- FA3 `softmax.h` and `utils.h`: base-2 online softmax, final-only row-sum
-  reduction, causal-mask specialization, and register-layout BF16 packing.
-- FA3 `epilogue_fwd.hpp`: warp-cooperative `stmatrix` shared-memory stores
-  followed by a TMA output store.
-- FA4 `cute/tile_scheduler.py::SingleTileLPTScheduler`: longest causal query
-  tiles first, with batch/head locality.
-
-The [FA3 paper](https://arxiv.org/abs/2407.08608) describes warp specialization,
-ping-pong scheduling and intra-warpgroup pipelining. The
-[FA4 paper](https://arxiv.org/abs/2603.05451) and official
-`cute/flash_fwd_sm90.py` are used only where applicable to Hopper; Blackwell
-TMEM, `tcgen05`, and two-CTA MMA are not ported.
-
-All 30 shapes pass output/LSE checks against the FP32 PyTorch oracle. The four
-existing smoke-test shapes also pass with all references. Native MHA memcheck
-at `T=64` and `B=4,T=2048` reports zero errors; racecheck at the latter shape
-reports zero hazards. No Nsight-counter or measured-overlap claims are made.
-
-The saved run is in the generated, Git-ignored
-[`profiles/flash_attention_optimization/`](profiles/flash_attention_optimization/):
-`final.csv`, timing samples, exact baseline/final source snapshots, environment
-metadata, and sanitizer logs. GEMM, SM89 and MoE kernels are unchanged.
+This run reaches ≥95% of FA4 throughput on **3/5 MHA shapes**.
 
 ## MegaMoE
 

@@ -22,7 +22,7 @@ def save(fig, output, name):
 
 def roofline(rows, metadata, output, measured=False):
     dtypes = list(dict.fromkeys(r["dtype"] for r in rows))
-    fig, axes = plt.subplots(1, len(dtypes), figsize=(15 if len(dtypes) == 2 else 10, 7.8), squeeze=False)
+    fig, axes = plt.subplots(1, len(dtypes), figsize=(15 if len(dtypes) == 2 else 10, 7), squeeze=False)
     for ax, dtype in zip(axes.flat, dtypes):
         names = metadata.get("stage_names", {"fp32": FP32, "bf16": BF16})[dtype]
         prefix = metadata.get("stage_prefixes", {"fp32": "F", "bf16": "T"})[dtype]
@@ -61,11 +61,7 @@ def roofline(rows, metadata, output, measured=False):
         ax.grid(True, which="both", alpha=.2)
         ax.legend(loc="upper center", bbox_to_anchor=(.5, -.18), fontsize=8, frameon=False, ncol=2)
     fig.suptitle(f'{metadata["gpu"]}: GEMM ablation roofline', fontsize=14)
-    caption = ("NCU cold-cache duration and DRAM bytes from the same replay reports; each line follows increasing matrix size."
-               if measured else "Measured CUDA Graph runtime; X uses minimum algorithmic IO (not DRAM counters). Labels on cuBLAS show matrix size.")
-    fig.text(.5, .035, caption, ha="center", fontsize=9)
-    fig.text(.5, .01, f'Theoretical compute roofs at sampled active clock {metadata["clock_assumption_mhz"]:.0f} MHz; dense BF16 throughput.', ha="center", fontsize=9)
-    fig.subplots_adjust(top=.86, bottom=.38, wspace=.23)
+    fig.subplots_adjust(top=.86, bottom=.32, wspace=.23)
     save(fig, output, "roofline_measured_dram" if measured else "roofline_analytical")
 
 

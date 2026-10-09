@@ -41,8 +41,13 @@ constexpr float LOG2E = 1.4426950408889634F;
 struct SharedStorage {
     alignas(SMEM_ALIGNMENT) bf16 Q[2][BM * HALF_D];
     alignas(SMEM_ALIGNMENT) bf16 K[STAGES][2][BN * HALF_D];
-    alignas(SMEM_ALIGNMENT) bf16 V[STAGES][2][BN * HALF_D];
-    alignas(SMEM_ALIGNMENT) bf16 O[2][BM * HALF_D];
+    // FA3 flash_fwd_kernel_sm90.h::SharedStorage aliases epilogue O only
+    // with mainloop V. Their lifetimes are disjoint after all consumers finish
+    // PV, so no separate 32 KiB output allocation is required.
+    union {
+        alignas(SMEM_ALIGNMENT) bf16 V[STAGES][2][BN * HALF_D];
+        alignas(SMEM_ALIGNMENT) bf16 O[2][BM * HALF_D];
+    };
 };
 
 constexpr size_t SMEM_BYTES = sizeof(SharedStorage) + SMEM_ALIGNMENT - 1;
@@ -89,19 +94,30 @@ __device__ __forceinline__ void barrier_expect_bytes(uint64_t* barrier, uint32_t
 }
 
 __device__ __forceinline__ void barrier_wait(uint64_t* barrier, int phase) {
+    // FA3 consumer_wait uses PipelineTmaAsync::consumer_try_wait before its
+    // blocking wait. CUTLASS arch/barrier.h::ClusterBarrier::wait supplies
+    // 0x989680 suspend ticks instead of repeatedly retrying short waits.
     asm volatile(
         "{ .reg .pred done;\n"
-        "wait_loop_%=:\n"
         "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 done, [%0], %1;\n"
-        "@!done bra wait_loop_%=;\n}"
+        "@done bra wait_done_%=;\n"
+        "wait_loop_%=:\n"
+        "mbarrier.try_wait.parity.acquire.cta.shared::cta.b64 done, [%0], %1, 0x989680;\n"
+        "@!done bra wait_loop_%=;\n"
+        "wait_done_%=:\n}"
         :: "r"(barrier_address(barrier)), "r"(phase) : "memory");
 }
 
 // FA3 mainloop::load: one elected producer issues one full-tile TMA copy;
 // the transaction barrier makes completion visible to both consumer groups.
+template <bool Query = false>
 __device__ __forceinline__ void tma_load(bf16* destination, const CUtensorMap* map, uint64_t* barrier, int token, int head, int batch) {
-    asm volatile("cp.async.bulk.tensor.5d.shared::cluster.global.tile.mbarrier::complete_tx::bytes [%0], [%1, {0, %3, %4, 0, %5}], [%2];"
-        :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(destination))), "l"(map), "r"(barrier_address(barrier)), "r"(token), "r"(head), "r"(batch) : "memory");
+    // FA3 mainloop::load uses EVICT_FIRST for Q and EVICT_LAST for reused K/V.
+    // These exact policies and the PTX cache-hint operand come from CUTLASS
+    // cute/arch/copy_sm90_desc.hpp::CacheHintSm90 / SM90_TMA_LOAD_5D.
+    constexpr uint64_t cache_hint = Query ? 0x12F0000000000000ULL : 0x14F0000000000000ULL;
+    asm volatile("cp.async.bulk.tensor.5d.shared::cluster.global.mbarrier::complete_tx::bytes.L2::cache_hint [%0], [%1, {0, %3, %4, 0, %5}], [%2], %6;"
+        :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(destination))), "l"(map), "r"(barrier_address(barrier)), "r"(token), "r"(head), "r"(batch), "l"(cache_hint) : "memory");
 }
 
 __device__ __forceinline__ void advance_stage(int& stage, int& phase) {
@@ -125,6 +141,13 @@ __device__ __forceinline__ uint64_t make_smem_descriptor(bf16* pointer) {
     descriptor |= encode_descriptor(1024) << 32U;
     descriptor |= 1ULL << 62U;
     return descriptor;
+}
+
+// CUTLASS mma_traits_sm90_gmma.hpp::DescriptorIterator::operator+ updates
+// only the low 32-bit descriptor word; the layout/swizzle word is invariant.
+// Offsets are encoded in 16-byte units, not bytes or BF16 element indices.
+__device__ __forceinline__ uint64_t advance_descriptor(uint64_t descriptor, uint32_t offset) {
+    return (descriptor & 0xffffffff00000000ULL) | (static_cast<uint32_t>(descriptor) + offset);
 }
 
 __device__ __forceinline__ void warpgroup_fence() {
@@ -162,7 +185,7 @@ __device__ __forceinline__ void fence_probabilities(uint32_t (&P)[GROUPS][4]) {
 // FA3 QK uses the official SS BF16 atom with FP32 accumulators.
 // Source: cute/arch/mma_sm90_gmma.hpp::MMA_64x128x16_F32BF16BF16_SS.
 template <int ScaleD>
-__device__ __forceinline__ void wgmma_qk(float (&accumulator)[GROUPS][8], bf16* A, bf16* B) {
+__device__ __forceinline__ void wgmma_qk(float (&accumulator)[GROUPS][8], uint64_t A, uint64_t B) {
     asm volatile("wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32, %33, %34, %35, %36, %37, %38, %39, %40, %41, %42, %43, %44, %45, %46, %47, %48, %49, %50, %51, %52, %53, %54, %55, %56, %57, %58, %59, %60, %61, %62, %63}, %64, %65, %66, 1, 1, 0, 0;"
         : "+f"(accumulator[0][0]), "+f"(accumulator[0][1]), "+f"(accumulator[0][2]), "+f"(accumulator[0][3]),
           "+f"(accumulator[0][4]), "+f"(accumulator[0][5]), "+f"(accumulator[0][6]), "+f"(accumulator[0][7]),
@@ -180,13 +203,13 @@ __device__ __forceinline__ void wgmma_qk(float (&accumulator)[GROUPS][8], bf16* 
           "+f"(accumulator[6][4]), "+f"(accumulator[6][5]), "+f"(accumulator[6][6]), "+f"(accumulator[6][7]),
           "+f"(accumulator[7][0]), "+f"(accumulator[7][1]), "+f"(accumulator[7][2]), "+f"(accumulator[7][3]),
           "+f"(accumulator[7][4]), "+f"(accumulator[7][5]), "+f"(accumulator[7][6]), "+f"(accumulator[7][7])
-        : "l"(make_smem_descriptor(A)), "l"(make_smem_descriptor(B)), "n"(ScaleD));
+        : "l"(A), "l"(B), "n"(ScaleD));
 }
 
 // FA3 PV uses the RS atom: P is four BF16x2 registers per K=16 step;
 // MN-major V is consumed directly from TMA-swizzled shared memory.
 // Source: cute/arch/mma_sm90_gmma.hpp::MMA_64x128x16_F32BF16BF16_RS.
-__device__ __forceinline__ void wgmma_pv(float (&accumulator)[GROUPS][8], const uint32_t (&A)[4], bf16* B) {
+__device__ __forceinline__ void wgmma_pv(float (&accumulator)[GROUPS][8], const uint32_t (&A)[4], uint64_t B) {
     asm volatile("wgmma.mma_async.sync.aligned.m64n128k16.f32.bf16.bf16 {%0, %1, %2, %3, %4, %5, %6, %7, %8, %9, %10, %11, %12, %13, %14, %15, %16, %17, %18, %19, %20, %21, %22, %23, %24, %25, %26, %27, %28, %29, %30, %31, %32, %33, %34, %35, %36, %37, %38, %39, %40, %41, %42, %43, %44, %45, %46, %47, %48, %49, %50, %51, %52, %53, %54, %55, %56, %57, %58, %59, %60, %61, %62, %63}, {%64, %65, %66, %67}, %68, 1, 1, 1, 1;"
         : "+f"(accumulator[0][0]), "+f"(accumulator[0][1]), "+f"(accumulator[0][2]), "+f"(accumulator[0][3]),
           "+f"(accumulator[0][4]), "+f"(accumulator[0][5]), "+f"(accumulator[0][6]), "+f"(accumulator[0][7]),
@@ -204,20 +227,27 @@ __device__ __forceinline__ void wgmma_pv(float (&accumulator)[GROUPS][8], const 
           "+f"(accumulator[6][4]), "+f"(accumulator[6][5]), "+f"(accumulator[6][6]), "+f"(accumulator[6][7]),
           "+f"(accumulator[7][0]), "+f"(accumulator[7][1]), "+f"(accumulator[7][2]), "+f"(accumulator[7][3]),
           "+f"(accumulator[7][4]), "+f"(accumulator[7][5]), "+f"(accumulator[7][6]), "+f"(accumulator[7][7])
-        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "l"(make_smem_descriptor<true>(B)));
+        : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "l"(B));
 }
 
 __device__ __forceinline__ void issue_qk(float (&scores)[GROUPS][8], SharedStorage& shared, int stage, int consumer) {
     fence_scores(scores);
     warpgroup_fence();
-    wgmma_qk<0>(scores, shared.Q[0] + consumer * 64 * HALF_D, shared.K[stage][0]);
+    // FA3's partitioned GMMA tensors use CUTLASS DescriptorIterator. Build
+    // each band once, then advance by the same encoded K-step offsets rather
+    // than repeating shared-address masking and layout-field construction.
+    const uint64_t Q0 = make_smem_descriptor(shared.Q[0] + consumer * 64 * HALF_D);
+    const uint64_t K0 = make_smem_descriptor(shared.K[stage][0]);
+    const uint64_t Q1 = make_smem_descriptor(shared.Q[1] + consumer * 64 * HALF_D);
+    const uint64_t K1 = make_smem_descriptor(shared.K[stage][1]);
+    wgmma_qk<0>(scores, Q0, K0);
 #pragma unroll
     for (int k = 1; k < HALF_D / WGMMA_K; ++k) {
-        wgmma_qk<1>(scores, shared.Q[0] + consumer * 64 * HALF_D + k * WGMMA_K, shared.K[stage][0] + k * WGMMA_K);
+        wgmma_qk<1>(scores, advance_descriptor(Q0, k * 2), advance_descriptor(K0, k * 2));
     }
 #pragma unroll
     for (int k = 0; k < HALF_D / WGMMA_K; ++k) {
-        wgmma_qk<1>(scores, shared.Q[1] + consumer * 64 * HALF_D + k * WGMMA_K, shared.K[stage][1] + k * WGMMA_K);
+        wgmma_qk<1>(scores, advance_descriptor(Q1, k * 2), advance_descriptor(K1, k * 2));
     }
     warpgroup_commit();
     fence_scores(scores);
@@ -227,9 +257,10 @@ __device__ __forceinline__ void issue_pv(float (&output)[GROUPS][8], uint32_t (&
     fence_scores(output);
     fence_probabilities(P);
     warpgroup_fence();
+    const uint64_t V = make_smem_descriptor<true>(shared.V[stage][0]);
 #pragma unroll
     for (int k = 0; k < BN / WGMMA_K; ++k) {
-        wgmma_pv(output, P[k], shared.V[stage][0] + k * WGMMA_K * HALF_D);
+        wgmma_pv(output, P[k], advance_descriptor(V, k * WGMMA_K * HALF_D * sizeof(bf16) / 16));
     }
     warpgroup_commit();
     fence_scores(output);
@@ -271,8 +302,9 @@ __device__ __forceinline__ void online_softmax(float (&scores)[GROUPS][8], float
     // Official CuTe utils.py::fmax_reduce (arch < 100) uses four independent
     // maximum chains, then a tree merge. Keep that Hopper reduction order
     // for each row fragment instead of one serial maximum across all groups.
-    float partial_max[2][4] = {{-FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX},
-                               {-FLT_MAX, -FLT_MAX, -FLT_MAX, -FLT_MAX}};
+    // Official CuTe utils.py::fmax_reduce seeds its four chains from the
+    // first four scores, avoiding redundant max instructions against -inf.
+    float partial_max[2][4];
 
 #pragma unroll
     for (int group = 0; group < GROUPS; ++group) {
@@ -290,22 +322,24 @@ __device__ __forceinline__ void online_softmax(float (&scores)[GROUPS][8], float
 #pragma unroll
         for (int i = 0; i < 4; ++i) {
             const int item = (i & 1) + (i / 2) * 4;
-            partial_max[0][i] = fmaxf(partial_max[0][i], scores[group][item]);
-            partial_max[1][i] = fmaxf(partial_max[1][i], scores[group][item + 2]);
+            partial_max[0][i] = group == 0 ? scores[group][item] : fmaxf(partial_max[0][i], scores[group][item]);
+            partial_max[1][i] = group == 0 ? scores[group][item + 2] : fmaxf(partial_max[1][i], scores[group][item + 2]);
         }
     }
     float current_max[2];
 #pragma unroll
     for (int r = 0; r < 2; ++r) {
         current_max[r] = fmaxf(fmaxf(partial_max[r][0], partial_max[r][1]), fmaxf(partial_max[r][2], partial_max[r][3]));
+        // Official CuTe utils.py::fmax_reduce merges init_val into the local
+        // tree result before softmax.py performs its four-lane warp reduction.
+        if constexpr (!First) current_max[r] = fmaxf(current_max[r], row_max[r]);
     }
     current_max[0] = fmaxf(current_max[0], __shfl_xor_sync(0xffffffff, current_max[0], 1));
     current_max[0] = fmaxf(current_max[0], __shfl_xor_sync(0xffffffff, current_max[0], 2));
     current_max[1] = fmaxf(current_max[1], __shfl_xor_sync(0xffffffff, current_max[1], 1));
     current_max[1] = fmaxf(current_max[1], __shfl_xor_sync(0xffffffff, current_max[1], 2));
 
-    float next_max[2] = {First ? current_max[0] : fmaxf(row_max[0], current_max[0]),
-                         First ? current_max[1] : fmaxf(row_max[1], current_max[1])};
+    float next_max[2] = {current_max[0], current_max[1]};
     // FA4 paper Section 3.1.4 / softmax.py::SoftmaxSm100.update_row_max:
     // keep the previous exponent base until the increase exceeds 8 in log2
     // units. P, row_sum and O retain that same base; final normalization and
@@ -319,18 +353,42 @@ __device__ __forceinline__ void online_softmax(float (&scores)[GROUPS][8], float
             else previous_scale[r] = fast_exp2(change);
         }
     }
-    float local_sum[2] = {};
     const float maximum_scaled[2] = {next_max[0] * scale_log2, next_max[1] * scale_log2};
 
+    // FA3 hopper/softmax.h::Softmax::online_softmax first calls
+    // scale_apply_exp2, then reduce_sum<warp_reduce=false>. Keep SFU work
+    // separate from the dependent row-sum chains, as in that implementation.
+#pragma unroll
+    for (int row_id = 0; row_id < 2; ++row_id) {
+#pragma unroll
+        for (int group = 0; group < GROUPS; ++group) {
+#pragma unroll
+            for (int i = 0; i < 4; ++i) {
+                // FA3 scale_apply_exp2 traverses one row at a time (mi, ni).
+                const int item = (i & 1) + (i / 2) * 4 + row_id * 2;
+                const float exponent = __fmaf_rn(scores[group][item], scale_log2, -maximum_scaled[row_id]);
+                scores[group][item] = fast_exp2(exponent);
+            }
+        }
+    }
+    // Official CuTe utils.py::fadd_reduce documents a commented scalar
+    // four-chain/tree alternative beside its active Hopper x.reduce path.
+    // This implements that documented alternative, not the active lowering,
+    // reduction structure, without the SM100-only packed-f32x2 instructions.
+    float partial_sum[2][4] = {};
 #pragma unroll
     for (int group = 0; group < GROUPS; ++group) {
 #pragma unroll
-        for (int item = 0; item < 8; ++item) {
-            const int row_id = item == 0 || item == 1 || item == 4 || item == 5 ? 0 : 1;
-            const float exponent = __fmaf_rn(scores[group][item], scale_log2, -maximum_scaled[row_id]);
-            scores[group][item] = fast_exp2(exponent);
-            local_sum[row_id] += scores[group][item];
+        for (int i = 0; i < 4; ++i) {
+            const int item = (i & 1) + (i / 2) * 4;
+            partial_sum[0][i] = group == 0 ? scores[group][item] : partial_sum[0][i] + scores[group][item];
+            partial_sum[1][i] = group == 0 ? scores[group][item + 2] : partial_sum[1][i] + scores[group][item + 2];
         }
+    }
+    float local_sum[2];
+#pragma unroll
+    for (int row = 0; row < 2; ++row) {
+        local_sum[row] = (partial_sum[row][0] + partial_sum[row][1]) + (partial_sum[row][2] + partial_sum[row][3]);
     }
     row_sum[0] = (First ? 0.0F : row_sum[0] * previous_scale[0]) + local_sum[0];
     row_sum[1] = (First ? 0.0F : row_sum[1] * previous_scale[1]) + local_sum[1];
@@ -350,17 +408,29 @@ __device__ __forceinline__ void scale_output(float (&output)[GROUPS][8], const f
     }
 }
 
-// FA3 epilogue_fwd.hpp::store: retile register accumulators into SW128 BF16
-// shared O, then use one TMA store instead of many small global stores.
-__device__ __forceinline__ void store_output(SharedStorage& shared, float* lse, float (&accumulator)[GROUPS][8], const float (&row_max)[2], float (&row_sum)[2], int batch, int head, int start, int sequence, int heads, int tid, float scale) {
-    const int lane = tid & 31;
-    const int row = (tid >> 5) * 16 + lane / 4;
+// FA3 mainloop::mma calls softmax.finalize while the final PV is outstanding.
+// Row sums, reciprocals and LSE do not depend on the O accumulator registers.
+__device__ __forceinline__ void finalize_rows(float (&inverse)[2], float (&lse_values)[2], const float (&row_max)[2], float (&row_sum)[2], float scale) {
 #pragma unroll
     for (int r = 0; r < 2; ++r) {
         row_sum[r] += __shfl_xor_sync(0xffffffff, row_sum[r], 1);
         row_sum[r] += __shfl_xor_sync(0xffffffff, row_sum[r], 2);
     }
-    const float inverse[2] = {1.0F / row_sum[0], 1.0F / row_sum[1]};
+    // Official CuTe softmax.py::Softmax.finalize uses rcp_approx; FA3's
+    // equivalent division is compiled with --use_fast_math. These fixed
+    // causal rows have positive sums, so normalize with that same primitive.
+#pragma unroll
+    for (int r = 0; r < 2; ++r) {
+        asm("rcp.approx.ftz.f32 %0, %1;" : "=f"(inverse[r]) : "f"(row_sum[r]));
+        lse_values[r] = row_max[r] * scale + __logf(row_sum[r]);
+    }
+}
+
+// FA3 epilogue_fwd.hpp::store: retile register accumulators into SW128 BF16
+// shared O, then use one TMA store instead of many small global stores.
+__device__ __forceinline__ void store_output(SharedStorage& shared, float* lse, float (&accumulator)[GROUPS][8], const float (&inverse)[2], const float (&lse_values)[2], int batch, int head, int start, int sequence, int heads, int tid) {
+    const int lane = tid & 31;
+    const int row = (tid >> 5) * 16 + lane / 4;
     // FA3 epilogue_fwd.hpp::SmemCopyAtomO selects SM90_U32x4_STSM_N.
     // CUTLASS copy_traits_sm90.hpp maps the four packed accumulator pairs
     // to four 8x8 matrices. stmatrix performs the register-to-SW128 retile
@@ -385,7 +455,7 @@ __device__ __forceinline__ void store_output(SharedStorage& shared, float* lse, 
 #pragma unroll
         for (int r = 0; r < 2; ++r) {
             const int token = start + row + r * 8;
-            if (token < sequence) lse[(batch * heads + head) * sequence + token] = row_max[r] * scale + __logf(row_sum[r]);
+            if (token < sequence) lse[(batch * heads + head) * sequence + token] = lse_values[r];
         }
     }
 }
@@ -447,20 +517,30 @@ __global__ __launch_bounds__(NUM_THREADS) void flash_attention_forward_sm90_kern
         asm volatile("setmaxnreg.dec.sync.aligned.u32 24;");
         if (tid == 0) {
             barrier_expect_bytes(&query_full, 2 * TMA_TILE_BYTES);
-            tma_load(shared.Q[0], &Q_map, &query_full, start, head, batch);
+            tma_load<true>(shared.Q[0], &Q_map, &query_full, start, head, batch);
             int stage = 0, phase = 0;
-            // FA3 mainloop::load uses independent K/V pipelines. The elected
-            // producer fills each protected stage while consumers overlap QK,
-            // softmax and PV; neither buffer is overwritten before release.
+            barrier_wait(&k_empty[stage], phase);
+            barrier_expect_bytes(&k_full[stage], KV_TRANSACTION_BYTES);
+            tma_load(shared.K[stage][0], &K_map, &k_full[stage], start, kv_head, batch);
+            // FA3 mainloop::load / IntraWGOverlap primes K(current), then
+            // loads K(next) before V(current). QK gets one tile of lookahead;
+            // independent empty barriers still protect both circular buffers.
+            // FA3 mainloop::load uses unroll(2) for non-transposed TMA K/V.
+#pragma unroll 2
             for (int iteration = 0; iteration <= query_block; ++iteration) {
                 const int token = (query_block - iteration) * BN;
-                barrier_wait(&k_empty[stage], phase);
-                barrier_expect_bytes(&k_full[stage], KV_TRANSACTION_BYTES);
-                tma_load(shared.K[stage][0], &K_map, &k_full[stage], token, kv_head, batch);
+                int next_stage = stage, next_phase = phase;
+                advance_stage(next_stage, next_phase);
+                if (iteration < query_block) {
+                    barrier_wait(&k_empty[next_stage], next_phase);
+                    barrier_expect_bytes(&k_full[next_stage], KV_TRANSACTION_BYTES);
+                    tma_load(shared.K[next_stage][0], &K_map, &k_full[next_stage], token - BN, kv_head, batch);
+                }
                 barrier_wait(&v_empty[stage], phase);
                 barrier_expect_bytes(&v_full[stage], KV_TRANSACTION_BYTES);
                 tma_load(shared.V[stage][0], &V_map, &v_full[stage], token, kv_head, batch);
-                advance_stage(stage, phase);
+                stage = next_stage;
+                phase = next_phase;
             }
         }
         return;
@@ -486,7 +566,10 @@ __global__ __launch_bounds__(NUM_THREADS) void flash_attention_forward_sm90_kern
     const float scale_log2 = scale * LOG2E;
     int stage = 0, phase = 0;
     barrier_wait(&k_full[stage], phase);
-    float scores[GROUPS][8] = {};
+    // FA3 mainloop::mma leaves the QK accumulator fragment uninitialized:
+    // utils.h::gemm<zero_init=true> overwrites it with GMMA ScaleOut::Zero.
+    // issue_qk likewise uses ScaleD=0 first, so no CUDA-core zeroing is needed.
+    float scores[GROUPS][8];
     issue_qk(scores, shared, stage, consumer);
     warpgroup_wait<0>();
     if (tid == 0) barrier_arrive(&k_empty[stage]);
@@ -498,12 +581,21 @@ __global__ __launch_bounds__(NUM_THREADS) void flash_attention_forward_sm90_kern
     // FA3 Section 3.2 / mainloop::mma (IntraWGOverlap): QK(next) precedes
     // PV(current). wait_group<1> exposes scores while PV runs alongside
     // CUDA-core softmax; wait_group<0> precedes rescaling the O registers.
+    // FA3 mainloop::mma keeps its unmasked fwd_step loop rolled (unroll 1),
+    // avoiding multiple large softmax/WGMMA bodies in the instruction stream.
+#pragma unroll 1
     for (int iteration = 1; iteration <= query_block; ++iteration) {
-        barrier_wait(&k_full[stage], phase);
-        float next_scores[GROUPS][8] = {};
+        // FA3 mainloop::mma / IntraWGOverlap::fwd_step waits for K only in
+        // consumer WG0. Its scheduler handoff makes that acquire visible to
+        // WG1; both groups still release K after their own WGMMA completes.
+        if (consumer == 0) barrier_wait(&k_full[stage], phase);
+        // As in FA3 fwd_step, the first QK WGMMA overwrites every score register.
+        float next_scores[GROUPS][8];
         asm volatile("bar.sync %0, 256;" :: "r"(group) : "memory");
         issue_qk(next_scores, shared, stage, consumer);
-        barrier_wait(&v_full[value_stage], value_phase);
+        // FA3 fwd_step uses the same WG0-only wait for V. Signal the peer only
+        // after issuing PV, preserving the official QK -> PV -> handoff order.
+        if (consumer == 0) barrier_wait(&v_full[value_stage], value_phase);
         issue_pv(O, P, shared, value_stage);
         asm volatile("bar.arrive %0, 256;" :: "r"(3 - group) : "memory");
         warpgroup_wait<1>();
@@ -521,9 +613,16 @@ __global__ __launch_bounds__(NUM_THREADS) void flash_attention_forward_sm90_kern
     }
     barrier_wait(&v_full[value_stage], value_phase);
     issue_pv(O, P, shared, value_stage);
+    float inverse[2], lse_values[2];
+    // FA3 mainloop_fwd_sm90_tma_gmma_ws.hpp::mma: finalize precedes
+    // warpgroup_wait<0>, overlapping the final softmax reduction with PV.
+    finalize_rows(inverse, lse_values, row_max, row_sum, scale);
     warpgroup_wait<0>();
     if (tid == 0) barrier_arrive(&v_empty[value_stage]);
-    store_output(shared, logsumexp, O, row_max, row_sum, batch, head, query_start, sequence_length, query_heads, tid, scale);
+    // FA3 epilogue_fwd.hpp::store first synchronizes all epilogue threads:
+    // every warp group must stop reading V before shared O overwrites it.
+    asm volatile("bar.sync 3, 256;" ::: "memory");
+    store_output(shared, logsumexp, O, inverse, lse_values, batch, head, query_start, sequence_length, query_heads, tid);
     // FA3 epilogue_fwd.hpp::store uses fence_view_async_shared plus an
     // epilogue named barrier before the elected TMA store, then waits for
     // shared-source reads to finish before a CTA can release its storage.
