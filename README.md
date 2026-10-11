@@ -66,25 +66,87 @@ queue depth together; improvements are not necessarily monotonic.
 
 ### H100 MHA against official FlashAttention-4
 
-Latest saved paired FA4 run on NVIDIA H100 80GB HBM3 (SXM): fixed `B=4`,
+Latest saved paired FA4 run on NVIDIA H100 80GB HBM3 (SXM), using the isolated
+**A8 ablation path** (production kernels are unchanged): fixed `B=4`,
 `Hq=Hkv=8`, `D=128`. Both implementations use causal BF16 inputs/output
-and FP32 natural-log LSE. Times are medians of 15 trials
+and FP32 natural-log LSE. Times are medians of 35 trials
 after 1 second of warmup, measured with CUDA Graph replay; setup and Python
 API latency are excluded.
 
-This FA4 run uses an earlier kernel snapshot; the latest kernel has only
-been remeasured against FA3. Values below are from the same paired FA4 run,
-not a mixture of separate benchmarks.
+Each graph captures ten operations, with samples lasting at least 40 ms.
+The official reference is `flash-attn-4==4.0.0b34`. All values below come
+from one paired run, not a mixture of separate benchmarks.
 
 | size | dtype | operation | custom µs | reference (FA4) µs | reference % |
 | :--- | :--- | :--- | ---: | ---: | ---: |
-| B=4,T=512,Hkv=8 | BF16 | forward | 10.47 | 9.79 | 93.5 |
-| B=4,T=1024,Hkv=8 | BF16 | forward | 25.44 | 24.69 | 97.0 |
-| B=4,T=2048,Hkv=8 | BF16 | forward | 83.69 | 81.94 | 97.9 |
-| B=4,T=4096,Hkv=8 | BF16 | forward | 275.05 | 273.11 | 99.3 |
-| B=4,T=8192,Hkv=8 | BF16 | forward | 1023.66 | 962.41 | 94.0 |
+| B=4,T=512,Hkv=8 | BF16 | forward | 10.28 | 9.80 | 95.4 |
+| B=4,T=1024,Hkv=8 | BF16 | forward | 25.00 | 26.05 | 104.2 |
+| B=4,T=2048,Hkv=8 | BF16 | forward | 82.42 | 86.58 | 105.0 |
+| B=4,T=4096,Hkv=8 | BF16 | forward | 279.51 | 285.82 | 102.3 |
+| B=4,T=8192,Hkv=8 | BF16 | forward | 1023.54 | 1026.91 | 100.3 |
 
-This run reaches ≥95% of FA4 throughput on **3/5 MHA shapes**.
+This run reaches ≥95% of FA4 throughput on **5/5 MHA shapes**.
+
+### H100 FlashAttention ablation
+
+[`ablation/sm90_flash_attention/`](ablation/sm90_flash_attention/) isolates
+eight cumulative forward paths; production kernels are unchanged. Every stage
+runs on the same H100 with causal BF16 MHA, `B=4`, `H=8`, `D=128`, and
+`T ∈ {512,1024,2048,4096,8192}`, compared with official FA4 Hopper.
+
+| Stage | Addition |
+| :--- | :--- |
+| A1 | Existing FA2-style fused kernel, compiled for H100 |
+| A2 | TMA + WGMMA with one K/V slot and conservative waits |
+| A3 | Two-stage asynchronous K/V pipeline |
+| A4 | Producer/consumer register redistribution |
+| A5 | Consumer warp-group ping-pong scheduling |
+| A6 | QK(next)/PV(current)/softmax overlap |
+| A7 | Fast softmax, final-only row-sum reduction and conditional rescaling |
+| A8 | LPT/L2 scheduling, cache hints and STMatrix/TMA output epilogue |
+
+A1→A2 compares hardware paths, not one isolated technique. A7/A8 group related
+optimizations. Conditional rescaling is an explicitly labeled Hopper adaptation
+of FA4's Blackwell arithmetic; no Blackwell instructions are used.
+
+```bash
+bash scripts/benchmark_attention_ablation.sh --test
+bash scripts/benchmark_attention_ablation.sh
+```
+
+Reports overwrite `profiles/attention_ablation_sm90/`: the timing table, raw
+samples, environment metadata and PNG/PDF figure. At `T=8192`, A8 is **2.15×**
+faster than A1. Improvements are not monotonic: A5's handoff overhead regresses
+without A6's intra-warp-group overlap.
+
+<img src="assets/attention/sm90_ablation.png" alt="H100 MHA A1-A8 ablation versus official FlashAttention-4" width="800">
+
+### FlashAttention analytical roofline
+
+The same measured A1–A8/FA4 runtimes produce this minimum-I/O roofline.
+Useful causal QK/PV work is `F = 4 B H D · T(T+1)/2` FLOPs. Analytical bytes
+are `8 B H T D + 4 B H T`: one BF16 read of Q/K/V, one BF16 write of O,
+and one FP32 write of LSE. The plotted coordinates are `F / bytes` and
+`F / time`; softmax and masked tile computations are excluded from FLOPs.
+
+All stages share the same intensity at each length because their minimum I/O
+contract is identical. Repeated tile loads and L2 reuse are not measured; this
+plot does **not** identify the actual HBM bottleneck or GPU utilization.
+The nominal roofs use **989.5 dense BF16 TFLOP/s** (half NVIDIA's sparse figure)
+and **3.35 TB/s**, from [NVIDIA's H100 SXM specifications](https://www.nvidia.com/en-eu/data-center/h100/).
+These are SKU ceilings, not measured sustained peaks or adjusted for this run's
+525 W power limit.
+
+<img src="assets/attention/sm90_roofline_analytical.png" alt="H100 SXM analytical minimum-I/O FlashAttention roofline, A1-A8 and official FA4" width="800">
+
+Regenerate from saved measurements without renting a GPU:
+
+```bash
+uv run python ablation/sm90_flash_attention/roofline.py
+```
+
+PNG/PDF, derived coordinates and model metadata are saved alongside the timing
+reports. Future full ablation benchmarks also refresh the README figure asset.
 
 ## MegaMoE
 
