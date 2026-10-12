@@ -8,3 +8,4 @@ __pycache__/
 /docs
 .ruff_cache/
 /assets/benchmarks
+/output
