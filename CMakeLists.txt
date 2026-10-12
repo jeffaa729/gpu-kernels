@@ -55,6 +55,19 @@ target_link_libraries(gpu_kernels_operator_bench PRIVATE gpu_kernels CUDA::cubla
 add_library(gpu_kernels_moe_swiglu_bench SHARED benchmarks/bindings/moe_swiglu_bridge.cu)
 target_link_libraries(gpu_kernels_moe_swiglu_bench PRIVATE gpu_kernels)
 
+# Hopper MoE is optional so local GEMM/FA builds do not require CUTLASS.
+set(CUTLASS_DIR "" CACHE PATH "CUTLASS checkout for Hopper fused MoE")
+if(CUTLASS_DIR)
+    add_library(gpu_kernels_fused_moe_bench SHARED
+        kernels/common/cuda_common.cu
+        kernels/moe/fused/sm90.cu
+        benchmarks/bindings/fused_moe_bridge.cu)
+    target_include_directories(gpu_kernels_fused_moe_bench PRIVATE include "${CUTLASS_DIR}/include")
+    target_link_libraries(gpu_kernels_fused_moe_bench PRIVATE CUDA::cudart CUDA::cuda_driver)
+    target_compile_options(gpu_kernels_fused_moe_bench PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo;--expt-relaxed-constexpr;-Xptxas=-v>)
+    set_target_properties(gpu_kernels_fused_moe_bench PROPERTIES CUDA_ARCHITECTURES 90a)
+endif()
+
 # Tests and benchmarks share cases and compare numerical results with PyTorch.
 set(GPU_KERNELS_PYTHON "${CMAKE_CURRENT_SOURCE_DIR}/.venv/bin/python" CACHE FILEPATH "Python from uv sync")
 if(EXISTS "${GPU_KERNELS_PYTHON}")

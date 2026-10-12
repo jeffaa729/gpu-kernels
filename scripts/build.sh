@@ -16,10 +16,13 @@ if [[ -z "$cuda_arch" ]] && command -v nvidia-smi >/dev/null; then
 fi
 # Hopper WGMMA requires the architecture-specific sm_90a target.
 [[ "$cuda_arch" != 90 ]] || cuda_arch=90a
+extra_options=()
+[[ -z "${CUTLASS_DIR:-}" ]] || extra_options+=("-DCUTLASS_DIR=$CUTLASS_DIR")
 cmake -S "$repo_root" -B "$repo_root/build" \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_CUDA_ARCHITECTURES="${cuda_arch:-89}" \
     -DGPU_KERNELS_PYTHON="${GPU_KERNELS_PYTHON:-$repo_root/.venv/bin/python}" \
+    "${extra_options[@]}" \
     -DCMAKE_CUDA_COMPILER="$nvcc_bin"
 targets=()
 (( $# == 0 )) || targets=(--target "$@")
