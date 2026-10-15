@@ -5,8 +5,8 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python_bin="${GPU_KERNELS_PYTHON:-$repo_root/.venv/bin/python}"
 gpus="${1:-2}"
 (( $# == 0 )) || shift
-if [[ "$gpus" != 2 && "$gpus" != 4 ]]; then
-    echo "usage: bash scripts/benchmark_moe.sh [2|4] [--check] [--tokens ...]" >&2
+if [[ "$gpus" != 2 && "$gpus" != 4 && "$gpus" != 8 ]]; then
+    echo "usage: bash scripts/benchmark_moe.sh [2|4|8] [--check] [--tokens ...]" >&2
     exit 1
 fi
 if [[ ! -x "$python_bin" ]]; then

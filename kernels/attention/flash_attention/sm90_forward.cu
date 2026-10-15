@@ -281,6 +281,7 @@ __device__ __forceinline__ void online_softmax(float (&scores)[GROUPS][8], float
     // Seed the chains from the first four scores to avoid redundant maxima against -inf.
     float partial_max[2][4];
 
+    //
 #pragma unroll
     for (int group = 0; group < GROUPS; ++group) {
         const int column = group * 16 + 2 * (lane & 3);

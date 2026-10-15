@@ -303,8 +303,8 @@ def main():
     world = int(os.environ["WORLD_SIZE"])
     rank = int(os.environ["RANK"])
     local_rank = int(os.environ["LOCAL_RANK"])
-    if world not in (2, 4) or args.experts % world or args.topk > args.experts:
-        parser.error("use 2 or 4 GPUs, experts divisible by GPUs, and topk <= experts")
+    if world not in (2, 4, 8) or args.experts % world or args.topk > args.experts:
+        parser.error("use 2, 4 or 8 GPUs, experts divisible by GPUs, and topk <= experts")
     source_sha256 = {path: hashlib.sha256((ROOT / path).read_bytes()).hexdigest() for path in (
         "kernels/moe/fused/sm90.cu", "kernels/moe/fused/common.cuh",
         "include/fused_moe.h", "benchmarks/fused_moe.py",

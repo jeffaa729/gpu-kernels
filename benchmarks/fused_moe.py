@@ -9,7 +9,7 @@ import torch.distributed._symmetric_memory as symm_mem
 
 
 class MoePeers(ctypes.Structure):
-    _fields_ = ([(name, ctypes.c_void_p * 4) for name in ("x", "ids", "weights", "output")]
+    _fields_ = ([(name, ctypes.c_void_p * 8) for name in ("x", "ids", "weights", "output")]
                 + [(name, ctypes.c_void_p) for name in ("pool", "route_weights", "ready", "offsets")])
 
 
@@ -33,8 +33,8 @@ class CustomMoE:
         self.group = group
         self.rank = dist.get_rank(group)
         self.world = dist.get_world_size(group)
-        if self.world not in (2, 4):
-            raise ValueError("CustomMoE requires 2 or 4 ranks")
+        if self.world not in (2, 4, 8):
+            raise ValueError("CustomMoE requires 2, 4 or 8 ranks")
         if x.ndim != 2 or ids.ndim != 2 or w1.ndim != 3 or w2.ndim != 3:
             raise ValueError("expected x/ids matrices and w1/w2 three-dimensional tensors")
         tokens, hidden = x.shape
@@ -105,7 +105,7 @@ class CustomMoE:
                 symm_mem.rendezvous(tensor, group=group)
                 for tensor in (self.x_buffer, self.ids_buffer, self.weights_buffer, self.slots)
             )
-            pointer_array = ctypes.c_void_p * 4
+            pointer_array = ctypes.c_void_p * 8
             self.peers = MoePeers(*(pointer_array(*handle.buffer_ptrs) for handle in (
                 self.sym_x, self.sym_ids, self.sym_weights, self.sym_output
             )))

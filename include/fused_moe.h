@@ -8,10 +8,10 @@ namespace gpu_kernels {
 // Peer addresses are local mappings established by PyTorch symmetric memory.
 // Experts share a compact, BM-aligned token pool; routes retain capacity strides.
 struct MoePeers {
-    const void* x[4];
-    const int64_t* ids[4];
-    const float* weights[4];
-    void* output[4];
+    const void* x[8];
+    const int64_t* ids[8];
+    const float* weights[8];
+    void* output[8];
     void* pool;
     float* route_weights;
     int* ready;
