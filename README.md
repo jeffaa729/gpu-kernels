@@ -150,10 +150,43 @@ reports. Future full ablation benchmarks also refresh the README figure asset.
 
 ## MegaMoE
 
-The current code is the **unfused BF16 baseline**, using DeepEP dispatch/combine,
-two DeepGEMM expert GEMMs, and a custom CUDA SwiGLU kernel. The fused persistent
-MegaMoE kernel is not implemented yet. Distributed runs require two or four H100
-GPUs on one NVLink-connected node with DeepEP and DeepGEMM installed.
+### Hardware and configuration
+
+- **GPUs:** 2× NVIDIA H100 SXM, 80 GB HBM3 per GPU.
+- **Interconnect:** NVLink, topology `NV18`.
+- **Expert parallelism:** EP=2, with experts evenly split across GPUs.
+- **Precision:** BF16 inputs, weights and outputs; FP32 accumulation.
+
+The benchmarks use the following routed-expert layer presets, not full-model inference:
+
+| Parameter | V4-Flash preset | V4-Pro preset |
+| :--- | ---: | ---: |
+| Hidden size (H) | 4096 | 7168 |
+| Expert intermediate size (I) | 2048 | 3072 |
+| Total experts (E) | 256 | 384 |
+| Experts per GPU | 128 | 192 |
+| Top-k experts per token | 6 | 6 |
+| SwiGLU clamp | 10.0 | 10.0 |
+| Tokens per GPU (T) | 1 / 512 / 8192 / 32768 | 1 / 512 / 8192 / 32768 |
+
+### Benchmark results
+
+Measured on 2026-10-12. Times cover the complete routed-expert pipeline using
+CUDA Graph replay: median of 15 trials, taking the slower rank per sample.
+The reference is DeepEP V2 dispatch/combine + DeepGEMM BF16 grouped GEMMs +
+weighted SwiGLU. **Reference % = reference time / custom time × 100**;
+above 100% means custom is faster.
+
+| Preset | Tokens/GPU | Custom µs | DeepEP V2 + DeepGEMM µs | Reference % |
+| :--- | ---: | ---: | ---: | ---: |
+| V4-Flash | 1 | 217.43 | 290.56 | 133.6 |
+| V4-Flash | 512 | 2397.33 | 2697.71 | 112.5 |
+| V4-Flash | 8192 | 9687.96 | 6947.14 | 71.7 |
+| V4-Flash | 32768 | 27965.39 | 25115.96 | 89.8 |
+| V4-Pro | 1 | 497.24 | 654.98 | 131.7 |
+| V4-Pro | 512 | 8938.69 | 9913.89 | 110.9 |
+| V4-Pro | 8192 | 27662.31 | 18415.29 | 66.6 |
+| V4-Pro | 32768 | 76451.09 | 60420.00 | 79.0 |
 
 ## Run
 
@@ -170,5 +203,5 @@ bash scripts/benchmark_moe.sh 2 --check
 ```
 
 `all` covers the single-GPU GEMM and FlashAttention suites. The distributed MoE
-baseline has its own launcher. Runtime reports are overwritten in
+comparison has its own launcher. Runtime reports are overwritten in
 `profiles/runtime/`; Nsight reports use `bash scripts/profile.sh FAMILY quick`.
