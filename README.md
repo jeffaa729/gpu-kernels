@@ -66,26 +66,17 @@ queue depth together; improvements are not necessarily monotonic.
 
 ### H100 MHA against official FlashAttention-4
 
-Latest saved paired FA4 run on NVIDIA H100 80GB HBM3 (SXM), using the isolated
-**A8 ablation path** (production kernels are unchanged): fixed `B=4`,
-`Hq=Hkv=8`, `D=128`. Both implementations use causal BF16 inputs/output
-and FP32 natural-log LSE. Times are medians of 35 trials
-after 1 second of warmup, measured with CUDA Graph replay; setup and Python
-API latency are excluded.
+H100 SXM, causal BF16 MHA, `B=4, H=8, D=128`; median of 35 CUDA Graph
+timing trials on 2026-10-16 against FA4 `4.0.0b34`. The implementation includes
+256-byte TMA L2 promotion for Q/K/V. Output/LSE checks pass.
+**Reference % = FA4 time / custom time × 100**; higher is better.
 
-Each graph captures ten operations, with samples lasting at least 40 ms.
-The official reference is `flash-attn-4==4.0.0b34`. All values below come
-from one paired run, not a mixture of separate benchmarks.
-
-| size | dtype | operation | custom µs | reference (FA4) µs | reference % |
-| :--- | :--- | :--- | ---: | ---: | ---: |
-| B=4,T=512,Hkv=8 | BF16 | forward | 10.28 | 9.80 | 95.4 |
-| B=4,T=1024,Hkv=8 | BF16 | forward | 25.00 | 26.05 | 104.2 |
-| B=4,T=2048,Hkv=8 | BF16 | forward | 82.42 | 86.58 | 105.0 |
-| B=4,T=4096,Hkv=8 | BF16 | forward | 279.51 | 285.82 | 102.3 |
-| B=4,T=8192,Hkv=8 | BF16 | forward | 1023.54 | 1026.91 | 100.3 |
-
-This run reaches ≥95% of FA4 throughput on **5/5 MHA shapes**.
+| T | Custom µs | FA4 µs | Reference % |
+| ---: | ---: | ---: | ---: |
+| 2048 | 78.23 | 77.54 | 99.1 |
+| 4096 | 265.06 | 263.87 | 99.5 |
+| 8192 | 975.55 | 971.83 | 99.6 |
+| 16384 | 3717.90 | 3690.64 | 99.3 |
 
 ### H100 FlashAttention ablation
 

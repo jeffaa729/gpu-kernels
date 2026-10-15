@@ -45,7 +45,7 @@ struct SharedStorage {
 
 constexpr size_t SMEM_BYTES = sizeof(SharedStorage) + SMEM_ALIGNMENT - 1;
 
-CUtensorMap make_attention_map(const bf16* pointer, int batch_size, int sequence_length, int heads) {
+CUtensorMap make_attention_map(const bf16* pointer, int batch_size, int sequence_length, int heads, CUtensorMapL2promotion promotion = CU_TENSOR_MAP_L2_PROMOTION_NONE) {
     CUtensorMap map;
     void* address = const_cast<bf16*>(pointer);
     // Transfer a complete Q/K/V tile per instruction. TMA groups D into 64-value bands
@@ -57,7 +57,7 @@ CUtensorMap make_attention_map(const bf16* pointer, int batch_size, int sequence
     const CUresult result = cuTensorMapEncodeTiled(
         &map, CU_TENSOR_MAP_DATA_TYPE_BFLOAT16, 5, address, global_shape, global_stride, box_shape, element_stride,
         CU_TENSOR_MAP_INTERLEAVE_NONE, CU_TENSOR_MAP_SWIZZLE_128B,
-        CU_TENSOR_MAP_L2_PROMOTION_NONE, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
+        promotion, CU_TENSOR_MAP_FLOAT_OOB_FILL_NONE);
     if (result != CUDA_SUCCESS) {
         const char* name = nullptr;
         cuGetErrorName(result, &name);
@@ -598,9 +598,12 @@ __global__ __launch_bounds__(NUM_THREADS) void flash_attention_forward_sm90_kern
 
 void flash_attention_forward_sm90_cuda(bf16* output, float* logsumexp, const bf16* query, const bf16* key, const bf16* value, int batch_size,
                                        int sequence_length, int query_heads, int key_value_heads, int head_size, float scale, cudaStream_t stream) {
-    const CUtensorMap Q_map = make_attention_map(query, batch_size, sequence_length, query_heads);
-    const CUtensorMap K_map = make_attention_map(key, batch_size, sequence_length, key_value_heads);
-    const CUtensorMap V_map = make_attention_map(value, batch_size, sequence_length, key_value_heads);
+    // Promote Q/K/V TMA reads to 256-byte L2 fetches; retain the existing SW128
+    // layout and eviction hints. Output stores keep the default promotion policy.
+    constexpr auto promotion = CU_TENSOR_MAP_L2_PROMOTION_L2_256B;
+    const CUtensorMap Q_map = make_attention_map(query, batch_size, sequence_length, query_heads, promotion);
+    const CUtensorMap K_map = make_attention_map(key, batch_size, sequence_length, key_value_heads, promotion);
+    const CUtensorMap V_map = make_attention_map(value, batch_size, sequence_length, key_value_heads, promotion);
     const CUtensorMap O_map = make_attention_map(output, batch_size, sequence_length, query_heads);
     // Budget 32 MiB for K/V, round the KV-head capacity down to a power of two,
     // then account for GQA reuse. The fixed suite needs no residual section.

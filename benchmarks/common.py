@@ -120,7 +120,7 @@ def save_report(family, rows, samples):
                   f'{row["reference_us"]:.2f}',
                   "—" if row["reference_pct"] is None else f'{row["reference_pct"]:.1f}']
                  for row in selected]
-        widths = [max(len(line[i]) for line in [headers, *cells]) for i in range(6)]
+        widths = [max(len(line[i]) for line in [headers, *cells]) for i in range(len(headers))]
         def line(values):
             return "| " + " | ".join(value.ljust(width) for value, width in zip(values, widths)) + " |"
         tables.append("\n".join([line(headers), line(["-" * n for n in widths]), *map(line, cells)]))
