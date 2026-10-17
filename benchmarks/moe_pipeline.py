@@ -269,9 +269,9 @@ def write_report(args, world, rows, source_sha256):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokens", type=int, nargs="+",
-                        help="tokens per rank; overrides --profile (default: 128 512)")
+                        help="tokens per rank (default: 1 512 8192 32768 for V4 presets; 128 512 for small checks)")
     parser.add_argument("--profile", choices=["sweep", *MODEL_PROFILES],
-                        help="sweep: tokens only; V4 presets: BF16 EP2 adaptations of PR316 shapes, not official speedups")
+                        help="default: v4-flash-bf16 for benchmarks; small shapes for --check/--check-only; sweep: tokens only")
     parser.add_argument("--output", default=str(ROOT / "profiles/runtime/moe.json"),
                         help="JSON report path; use a separate filename for each ablation")
     parser.add_argument("--resume", action="store_true", help="resume compatible completed cases from --output")
@@ -279,10 +279,10 @@ def main():
                         help="default: raw-topk for V4 presets, softmax otherwise; raw-topk matches pinned test")
     parser.add_argument("--max-memory-gib", type=float,
                         help="stop after saving a case exceeding this peak allocated GiB; not an OOM preflight")
-    parser.add_argument("--hidden", type=int, help="overrides profile (default: 1024)")
-    parser.add_argument("--intermediate", type=int, help="overrides profile (default: 512)")
-    parser.add_argument("--experts", type=int, help="overrides profile (default: 16)")
-    parser.add_argument("--topk", type=int, help="overrides profile (default: 4)")
+    parser.add_argument("--hidden", type=int, help="overrides profile hidden size")
+    parser.add_argument("--intermediate", type=int, help="overrides profile expert intermediate size")
+    parser.add_argument("--experts", type=int, help="overrides profile total expert count")
+    parser.add_argument("--topk", type=int, help="overrides profile experts selected per token")
     parser.add_argument("--clamp", type=float, default=10.0)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--trials", type=int, default=15)
@@ -292,6 +292,8 @@ def main():
     parser.add_argument("--check", action="store_true", help="check the first case against the small PyTorch oracle")
     parser.add_argument("--check-only", action="store_true")
     args = parser.parse_args()
+    if args.profile is None and not (args.check or args.check_only):
+        args.profile = "v4-flash-bf16"
     if args.tokens is None:
         args.tokens = [1, 512, 8192, 32768] if args.profile else [128, 512]
     defaults = MODEL_PROFILES.get(args.profile, dict(hidden=1024, intermediate=512, experts=16, topk=4))
