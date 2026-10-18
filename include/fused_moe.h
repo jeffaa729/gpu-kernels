@@ -16,6 +16,8 @@ struct MoePeers {
     float* route_weights;
     int* ready;
     int64_t* offsets;  // local_experts + 1 prefix offsets, in pool/activation rows
+    int* carrier_experts;
+    int64_t* carrier_rows;
 };
 
 struct MoeShape {

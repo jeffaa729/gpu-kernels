@@ -269,7 +269,7 @@ def write_report(args, world, rows, source_sha256):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--tokens", type=int, nargs="+",
-                        help="tokens per rank (default: 1 512 8192 32768 for V4 presets; 128 512 for small checks)")
+                        help="tokens per rank (default: 1 64 256 1024 2048 4096 for V4 presets; 128 512 for small checks)")
     parser.add_argument("--profile", choices=["sweep", *MODEL_PROFILES],
                         help="default: v4-flash-bf16 for benchmarks; small shapes for --check/--check-only; sweep: tokens only")
     parser.add_argument("--output", default=str(ROOT / "profiles/runtime/moe.json"),
@@ -295,7 +295,7 @@ def main():
     if args.profile is None and not (args.check or args.check_only):
         args.profile = "v4-flash-bf16"
     if args.tokens is None:
-        args.tokens = [1, 512, 8192, 32768] if args.profile else [128, 512]
+        args.tokens = [1, 64, 256, 1024, 2048, 4096] if args.profile else [128, 512]
     defaults = MODEL_PROFILES.get(args.profile, dict(hidden=1024, intermediate=512, experts=16, topk=4))
     for name, value in defaults.items():
         if getattr(args, name) is None:

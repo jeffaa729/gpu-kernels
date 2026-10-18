@@ -4,6 +4,31 @@ CUDA/CuTe kernels for GEMM, FlashAttention forward, and distributed MoE, benchma
 
 Times are in microseconds. **Reference % = reference time / custom time × 100.**
 
+## Benchmarks
+
+### RTX 4060
+
+```bash
+uv sync --locked
+GPU_KERNELS_CUDA_ARCH=89 bash scripts/benchmark.sh matmul full --reference cublas
+GPU_KERNELS_CUDA_ARCH=89 bash scripts/benchmark.sh flash_attention full --reference fa2
+```
+
+### H100 / H200
+
+```bash
+GPU_KERNELS_CUDA_ARCH=90 bash scripts/benchmark.sh matmul h100 --reference cublas
+GPU_KERNELS_CUDA_ARCH=90 bash scripts/benchmark.sh flash_attention h100 --reference fa4
+```
+
+### MegaMoE
+
+```bash
+export GPU_KERNELS_PYTHON=/path/to/venv/bin/python
+export CUTLASS_DIR=/path/to/cutlass
+bash scripts/benchmark_moe.sh 2 --trials 31
+```
+
 ## GEMM — RTX 4060 Laptop (SM89)
 
 FP32 and BF16 GEMM, TN layout, compared with cuBLAS.
@@ -88,3 +113,20 @@ Measured on 2026-10-17. Complete routed MoE layer: median of 15 CUDA Graph timin
 | 512 | 1307.33 | 1473.56 | 112.7 |
 | 8192 | 7691.06 | 6920.32 | 90.0 |
 | 32768 | 23566.40 | 26529.34 | 112.6 |
+
+## MegaMoE — 2× H200 NVL (EP2)
+
+Two NVIDIA H200 NVL GPUs, NVLink `NV6`, 600 W power limit per GPU. BF16 inputs, weights, and outputs; FP32 accumulation. V4-Flash-shaped routed MoE: `H=4096, I=2048, E=256`, 128 experts/GPU, top-k=6, SwiGLU clamp=10.
+
+Reference: DeepEP V2 dispatch/combine + DeepGEMM BF16 grouped GEMMs + weighted SwiGLU.
+
+Measured on 2026-10-18. Complete routed MoE layer: median of 31 CUDA Graph timing trials, 10 operations per replay, using the slowest rank per sample.
+
+| Tokens/GPU | Custom µs | DeepEP V2 + DeepGEMM µs | Reference % |
+| ---: | ---: | ---: | ---: |
+| 1 | 179.15 | 269.82 | 150.6 |
+| 64 | 1662.81 | 2068.48 | 124.4 |
+| 256 | 1739.71 | 2166.15 | 124.5 |
+| 1024 | 1926.32 | 2481.00 | 128.8 |
+| 2048 | 2024.23 | 2935.44 | 145.0 |
+| 4096 | 3551.77 | 4588.19 | 129.2 |

@@ -10,7 +10,7 @@ import torch.distributed._symmetric_memory as symm_mem
 
 class MoePeers(ctypes.Structure):
     _fields_ = ([(name, ctypes.c_void_p * 8) for name in ("x", "ids", "weights", "output")]
-                + [(name, ctypes.c_void_p) for name in ("pool", "route_weights", "ready", "offsets")])
+                + [(name, ctypes.c_void_p) for name in ("pool", "route_weights", "ready", "offsets", "carrier_experts", "carrier_rows")])
 
 
 class MoeShape(ctypes.Structure):
@@ -23,7 +23,8 @@ class CustomMoE:
     """Allocate once, then invoke collectively on one ordered stream per rank.
 
     x[T,H], ids/weights[T,K], w1[E/world,2I,H], w2[E/world,H,I]. H/I are
-    multiples of 256; IDs are valid global experts, distinct within each token.
+    multiples of 256, with at most 256 experts/rank. IDs are valid global experts,
+    distinct within each token.
     Inputs can change in place; W1 is prepacked once and must remain fixed.
     Keep this object alive until GPU work finishes;
     the returned output is overwritten by the next call. Only two ranks tested.
@@ -41,8 +42,8 @@ class CustomMoE:
         local_experts, _, intermediate = w2.shape
         experts, topk = local_experts * self.world, ids.shape[1]
         if (tokens <= 0 or hidden <= 0 or hidden % 256 or intermediate <= 0
-                or intermediate % 256 or local_experts <= 0 or not 1 <= topk <= experts):
-            raise ValueError("require T,E,I,H > 0, H/I divisible by 256, and 1 <= K <= E")
+                or intermediate % 256 or not 1 <= local_experts <= 256 or not 1 <= topk <= experts):
+            raise ValueError("require T,I,H > 0, H/I divisible by 256, 1 <= experts/rank <= 256, and 1 <= K <= E")
         if x.device.type != "cuda":
             raise ValueError("inputs must be CUDA tensors")
         self.device = x.device
@@ -57,8 +58,7 @@ class CustomMoE:
         self._check_tensor(w2, "w2", (local_experts, hidden, intermediate), torch.bfloat16)
         self.x, self.ids, self.weights = x, ids, weights
         self.w1, self.w2 = w1, w2
-        # Match sm90.cu::moe_block_m: locally tuned BF16 threshold, NOT an
-        # upstream default. PR360 N-split for small T; PR352 M-split otherwise.
+        # Match sm90.cu::moe_block_m, including the pipeline's row alignment.
         block_m = 64 if tokens <= 512 else 128
         self.capacity = ((self.world * tokens + block_m - 1) // block_m) * block_m
         # DeepGEMM layout/mega_moe.cuh::get_num_max_pool_tokens: total routes
@@ -121,6 +121,10 @@ class CustomMoE:
             self.peers.route_weights = self.route_weights.data_ptr()
             self.peers.ready = self.ready.data_ptr()
             self.peers.offsets = self.offsets.data_ptr()
+            self.carrier_experts = torch.empty((self.world * tokens,), dtype=torch.int32, device=self.device)
+            self.carrier_rows = torch.empty((self.world * tokens,), dtype=torch.int64, device=self.device)
+            self.peers.carrier_experts = self.carrier_experts.data_ptr()
+            self.peers.carrier_rows = self.carrier_rows.data_ptr()
             self.output = torch.empty((tokens, hidden), dtype=torch.bfloat16, device=self.device)
             self.sms = torch.cuda.get_device_properties(self.device).multi_processor_count
         self._routes_ptr = ctypes.cast(self.routes.data_ptr(), ctypes.POINTER(ctypes.c_int))
