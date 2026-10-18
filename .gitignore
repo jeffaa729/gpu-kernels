@@ -10,3 +10,7 @@ __pycache__/
 /assets/benchmarks
 /output
 /tmp
+*.md
+!/README.md
+# Local blog drafts, browser previews, and their PNG/SVG figure assets.
+/kernels/attention/flash_attention/blog_*

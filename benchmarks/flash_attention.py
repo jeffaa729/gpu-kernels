@@ -1,4 +1,4 @@
-"""Causal D128 BF16 MHA/GQA/MQA: PyTorch correctness and official FA runtime."""
+"""Causal D128 BF16 correctness; fixed B=4, H=8 MHA runtime comparisons."""
 
 import importlib
 
@@ -32,10 +32,32 @@ def load_reference_apis(reference):
     return reference, apis
 
 
+def forward_reference(tensors, scale):
+    """FP32 causal oracle with bounded score storage, including at T=16384."""
+    q, k, v = tensors
+    group_size = q.shape[2] // k.shape[2]
+    if group_size > 1:
+        k = k.repeat_interleave(group_size, dim=2)
+        v = v.repeat_interleave(group_size, dim=2)
+    q, k, v = (x.float().transpose(1, 2) for x in (q, k, v))
+    length = q.shape[2]
+    keys = torch.arange(length, device=q.device)
+    result = torch.empty_like(q)
+    row_lse = torch.empty(q.shape[:-1], device=q.device)
+    for start in range(0, length, 128):
+        end = min(start + 128, length)
+        scores = q[:, :, start:end] @ k.transpose(-1, -2) * scale
+        mask = torch.arange(start, end, device=q.device)[:, None] >= keys[None, :]
+        scores.masked_fill_(~mask, -torch.inf)
+        result[:, :, start:end] = scores.softmax(-1) @ v
+        row_lse[:, :, start:end] = scores.logsumexp(-1)
+    return result.transpose(1, 2).bfloat16(), row_lse
+
+
 def cases(args, family):
     lib = library("flash_attention")
     forward = bind(lib, "gpu_kernels_flash_forward", [P] * 5 + [I] * 5 + [F, P])
-    default_reference = "pytorch" if args.test else ("all" if args.suite == "h100" else "flash_attention_2")
+    default_reference = "pytorch" if args.test else ("flash_attention_4" if args.suite == "h100" else "flash_attention_2")
     reference, reference_apis = load_reference_apis(args.reference or default_reference)
 
     if args.test:
@@ -46,14 +68,9 @@ def cases(args, family):
             (1, 256, 8, 8, 128),
         )
     elif args.suite == "quick":
-        shapes = tuple((1, 512, 8, kv_heads, 128) for kv_heads in (8, 2, 1))
+        shapes = ((4, 2048, 8, 8, 128),)
     else:
-        shapes = tuple(
-            (batch, sequence, 8, kv_heads, 128)
-            for batch in (1, 4)
-            for sequence in (128, 256, 512, 1024, 2048)
-            for kv_heads in (8, 2, 1)
-        )
+        shapes = tuple((4, sequence, 8, 8, 128) for sequence in (2048, 4096, 8192, 16384))
 
     for b, t, query_heads, key_value_heads, d in shapes:
         query_shape = (b, t, query_heads, d)
@@ -62,21 +79,12 @@ def cases(args, family):
         key = (torch.randn(key_value_shape, device="cuda") * .5).bfloat16()
         value = (torch.randn(key_value_shape, device="cuda") * .5).bfloat16()
         inputs = (query, key, value)
-        oracle = tuple(x.float() for x in inputs)
-        group_size = query_heads // key_value_heads
         scale = d**-.5
-        mask = torch.ones(t, t, device="cuda", dtype=torch.bool).tril()
 
         def pytorch_forward(tensors=inputs):
-            q, k, v = tensors
-            if group_size > 1:
-                k = k.repeat_interleave(group_size, dim=2)
-                v = v.repeat_interleave(group_size, dim=2)
-            q, k, v = (x.float().transpose(1, 2) for x in (q, k, v))
-            scores = (q @ k.transpose(-1, -2) * scale).masked_fill(~mask, -torch.inf)
-            return (scores.softmax(-1) @ v).transpose(1, 2).bfloat16(), scores.logsumexp(-1)
+            return forward_reference(tensors, scale)
 
-        expected = tuple(x.detach() for x in pytorch_forward(oracle))
+        expected = tuple(x.detach() for x in pytorch_forward())
         output = torch.empty(query_shape, device="cuda", dtype=torch.bfloat16)
         lse = torch.empty(b, query_heads, t, device="cuda")
 

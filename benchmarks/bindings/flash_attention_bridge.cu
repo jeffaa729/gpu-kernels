@@ -19,8 +19,7 @@ extern "C" int gpu_kernels_flash_forward(
     const __nv_bfloat16* query, const __nv_bfloat16* key, const __nv_bfloat16* value,
     int batch, int sequence, int query_heads, int key_value_heads, int dimension, float scale, cudaStream_t stream) {
     try {
-        gpu_kernels::flash_attention_forward_cuda(
-            output, logsumexp, query, key, value,
+        gpu_kernels::flash_attention_forward_cuda(output, logsumexp, query, key, value,
             batch, sequence, query_heads, key_value_heads, dimension, scale, stream);
         return 0;
     } catch (const std::exception& error) {

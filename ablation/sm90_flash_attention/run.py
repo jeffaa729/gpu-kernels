@@ -30,7 +30,7 @@ STAGES = {
     "A7": "softmax + rescaling",
     "A8": "scheduling + epilogue",
 }
-SEQUENCES = (512, 1024, 2048, 4096, 8192)
+SEQUENCES = (2048, 4096, 8192, 16384)
 FIXED = dict(batch=4, query_heads=8, key_value_heads=8, head_dimension=128, causal=True, dtype="bf16")
 
 
