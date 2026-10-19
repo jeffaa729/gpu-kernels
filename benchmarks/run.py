@@ -9,11 +9,11 @@ FAMILIES = ("matmul", "flash_attention")
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("family", choices=(*FAMILIES, "all"),
+    parser.add_argument("family", choices=(*FAMILIES, "nvfp4", "all"),
                         type=lambda x: {"gemm": "matmul"}.get(x, x))
-    parser.add_argument("--suite", choices=("quick", "full", "h100"), default="quick")
+    parser.add_argument("--suite", choices=("quick", "full", "h100", "b200"), default="quick")
     parser.add_argument("--test", action="store_true", help="check native results against PyTorch; no timing")
-    parser.add_argument("--reference", help="cublas for GEMM; pytorch, fa2, fa3, fa4, or all for FlashAttention")
+    parser.add_argument("--reference", help="cublas for GEMM; cublaslt for NVFP4; pytorch, fa2, fa3, fa4, or all for FlashAttention")
     parser.add_argument("--operation", help="run only TN GEMM or FlashAttention forward")
     parser.add_argument("--profile", action="store_true", help="one uncaptured call inside cudaProfilerStart/Stop")
     parser.add_argument("--backend", choices=("custom", "reference", "all"), default="all",
@@ -22,7 +22,15 @@ def main():
     parser.add_argument("--warmup-ms", type=int, default=1000)
     parser.add_argument("--sample-ms", type=int, default=20)
     parser.add_argument("--trials", type=int, default=9)
+    parser.add_argument("--stage", choices=("main", "r0", "r1", "r2", "r3", "r4", "r5", "r6"), default="main",
+                        help="NVFP4 implementation snapshot")
+    parser.add_argument("--batch", action="store_true", help="run all B200 stages in isolated processes")
     args = parser.parse_args()
+    if args.batch:
+        if args.family != "nvfp4":
+            parser.error("--batch is for NVFP4 only")
+        importlib.import_module("nvfp4").batch(args)
+        return
     torch.manual_seed(2026)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -73,13 +81,17 @@ def main():
                     rows.extend(record(operation, timings))
                     samples.append(dict(size=operation.size, dtype=operation.dtype,
                                         operation=operation.name, samples_us=timings))
+                    if family == "nvfp4":
+                        samples[-1].update(rotation_sets=operation.rotations, graph_operations=args.graph_operations,
+                                           backend_settle_ms=operation.backend_settle_ms)
             stream.synchronize()
             if not count:
                 parser.error("No matching operations.")
             if args.test:
                 print(f"{family}: {count} correctness checks passed")
             elif not args.profile:
-                save_report(family, rows, samples)
+                report = f"nvfp4_{args.stage}" if family == "nvfp4" and args.stage != "main" else family
+                save_report(report, rows, samples)
 
 
 if __name__ == "__main__":

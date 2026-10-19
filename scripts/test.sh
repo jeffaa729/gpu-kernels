@@ -10,7 +10,9 @@ fi
 family="${1:-all}"
 (( $# == 0 )) || shift
 mkdir -p "$repo_root/build"
-if ! bash "$repo_root/scripts/build.sh" >"$repo_root/build/test_build.log" 2>&1; then
+build_targets=()
+[[ "$family" != nvfp4 ]] || build_targets=(gpu_kernels_nvfp4_bench)
+if ! bash "$repo_root/scripts/build.sh" "${build_targets[@]}" >"$repo_root/build/test_build.log" 2>&1; then
     cat "$repo_root/build/test_build.log" >&2
     exit 1
 fi

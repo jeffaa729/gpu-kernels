@@ -103,6 +103,11 @@ def measure(operation, args):
     names = list(graphs)
     for trial in range(args.trials):
         for name in (names if trial % 2 == 0 else names[::-1]):
+            # Settle each NVFP4 backend after switching workloads, outside the
+            # timed sample, to reduce cross-workload timing bias.
+            settle_ms = getattr(operation, "backend_settle_ms", 0)
+            if settle_ms:
+                elapsed(graphs[name], max(1, math.ceil(settle_ms * repeats[name] / args.sample_ms)))
             samples[name].append(1000 * elapsed(graphs[name], repeats[name]) /
                                  (repeats[name] * args.graph_operations))
     for graph in graphs.values():

@@ -4,10 +4,11 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 python_bin="${GPU_KERNELS_PYTHON:-$repo_root/.venv/bin/python}"
 if [[ $# == 0 || "$1" == "--help" || "$1" == "-h" ]]; then
-    echo "usage: bash scripts/benchmark.sh FAMILY [quick|full|h100] [options]"
-    echo "families: matmul (gemm), flash_attention, all"
-    echo "options: --reference cublas|pytorch|fa2|fa3|fa4|all, --operation NAME"
+    echo "usage: bash scripts/benchmark.sh FAMILY [quick|full|h100|b200] [options]"
+    echo "families: matmul (gemm), flash_attention, nvfp4, all (matmul + flash_attention)"
+    echo "options: --reference cublas|cublaslt|pytorch|fa2|fa3|fa4|all, --operation NAME"
     echo "matmul: cuBLAS is the only reference"
+    echo "nvfp4: --stage main|r0|r1|r2|r3|r4|r5|r6; --batch runs the complete B200 session"
     echo "MegaMoE baseline: bash scripts/benchmark_moe.sh [2|4] [options]"
     exit 0
 fi
@@ -20,7 +21,9 @@ if [[ ! -x "$python_bin" ]]; then
     exit 1
 fi
 mkdir -p "$repo_root/build"
-if ! bash "$repo_root/scripts/build.sh" >"$repo_root/build/benchmark_build.log" 2>&1; then
+build_targets=()
+[[ "$family" != nvfp4 ]] || build_targets=(gpu_kernels_nvfp4_bench)
+if ! bash "$repo_root/scripts/build.sh" "${build_targets[@]}" >"$repo_root/build/benchmark_build.log" 2>&1; then
     cat "$repo_root/build/benchmark_build.log" >&2
     exit 1
 fi
