@@ -10,9 +10,7 @@ find_package(CUDAToolkit 13.1 REQUIRED)
 get_filename_component(REPO_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../.." ABSOLUTE)
 add_library(gpu_kernels_nvfp4_bench SHARED
     "${REPO_ROOT}/benchmarks/bindings/nvfp4_bridge.cu"
-    "${REPO_ROOT}/kernels/gemm/nvfp4/sm100.cu")
-file(GLOB ABLATIONS CONFIGURE_DEPENDS "${REPO_ROOT}/ablation/sm100_nvfp4/*.cu")
-target_sources(gpu_kernels_nvfp4_bench PRIVATE ${ABLATIONS})
+    "${REPO_ROOT}/kernels/gemm/matmul/sm100.cu")
 target_include_directories(gpu_kernels_nvfp4_bench PRIVATE "${REPO_ROOT}/include")
 target_link_libraries(gpu_kernels_nvfp4_bench PRIVATE CUDA::cudart CUDA::cuda_driver CUDA::cublasLt)
 target_compile_options(gpu_kernels_nvfp4_bench PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:-lineinfo;-Xptxas=-v>)

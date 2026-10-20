@@ -23,12 +23,5 @@ struct Nvfp4Implementation {
 };
 
 Nvfp4Implementation nvfp4_sm100_implementation();
-Nvfp4Implementation nvfp4_r0_implementation();
-Nvfp4Implementation nvfp4_r1_implementation();
-Nvfp4Implementation nvfp4_r2_implementation();
-Nvfp4Implementation nvfp4_r3_implementation();
-Nvfp4Implementation nvfp4_r4_implementation();
-Nvfp4Implementation nvfp4_r5_implementation();
-Nvfp4Implementation nvfp4_r6_implementation();
 
 }  // namespace gpu_kernels

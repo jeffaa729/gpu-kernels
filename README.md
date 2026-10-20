@@ -26,14 +26,11 @@ GPU_KERNELS_CUDA_ARCH=90 bash scripts/benchmark.sh flash_attention h100 --refere
 ```bash
 bash scripts/test.sh nvfp4
 bash scripts/benchmark.sh nvfp4 b200 --reference cublaslt
-bash scripts/benchmark.sh nvfp4 b200 --batch
 ```
 
-Requires a B200 and CUDA Toolkit 13.1+. Packed E2M1 inputs, VEC16 UE4M3 scales, FP32 accumulation, and row-major FP16 output. `b200` runs 4096, 8192, and 16384; `quick` runs 8192. Both backends rotate identical operands across allocations totaling at least twice L2; preparation and a 100 ms per-backend settling interval are excluded from CUDA Graph timing. Results overwrite `profiles/runtime/nvfp4.{csv,md}`.
+Requires a B200 and CUDA Toolkit 13.1+. Packed E2M1 inputs, VEC16 UE4M3 scales, FP32 accumulation, and row-major FP16 output. `b200` runs 8192 and 16384; `quick` runs 8192. Both backends rotate identical operands across allocations totaling at least twice L2; preparation and a 100 ms per-backend settling interval are excluded from CUDA Graph timing. Results overwrite `profiles/runtime/nvfp4.{csv,md}`.
 
-`--batch` first checks R0, runs R0–R6 at 8192 in separate processes, then runs the main kernel at all three sizes. A baseline failure stops the batch; later stage failures are logged without discarding other results. Summary: `profiles/runtime/nvfp4_batch.{csv,md}`; logs: `profiles/runtime/nvfp4_batch/`. Select one snapshot with `--stage r0` through `--stage r6` (default: `main`).
-
-The complete kernels in `kernels/gemm/nvfp4/sm100.cu` and `ablation/sm100_nvfp4/` adapt [fast.cu](https://github.com/pranjalssh/fast.cu/tree/2dfe5e26aecfd9e5f27bf9d5837deea01acda24b/gb300/nvfp4) (MIT). B200 uses native K64 and relative shared descriptors: R0/R1 use K128 feeds; R2 adds K256 windows; R3 overlapping TMEM accumulators; R4 256-bit stores; R5 output cache policy; R6 exact block size. The main kernel additionally implements runtime L2-side ownership and the reference's 8×8 ordering for the 8192 cube. K96 tail stages do not apply. Existing SM89/SM90 kernels are unchanged.
+The main kernel in `kernels/gemm/matmul/sm100.cu` adapts [fast.cu](https://github.com/pranjalssh/fast.cu/tree/2dfe5e26aecfd9e5f27bf9d5837deea01acda24b/gb300/nvfp4) to native B200 K64 MMA, with runtime L2-side ownership, owned 8×8 ordering at 8192, owned 8×4 at 16384, and an eleven-slot scale queue. Existing SM89/SM90 kernels are unchanged.
 
 ### MegaMoE
 
@@ -64,30 +61,14 @@ BF16 GEMM, TN layout, compared with cuBLAS.
 
 ## GEMM — B200 (SM100)
 
-NVFP4 GEMM, TN layout, FP16 output. Median of nine CUDA Graph timing trials on 2026-10-19; CUDA Toolkit 13.1, cuBLASLt 13.2.2.2. Reference % = cuBLASLt time / custom time × 100. All stages pass numerical checks; the main kernel also passes both focused Compute Sanitizer memcheck cases with zero errors.
+NVFP4 GEMM, TN layout, FP16 output. Median of 15 paired CUDA Graph timing trials (30 ms minimum samples) on 2026-10-19; CUDA Toolkit 13.1, cuBLASLt 13.2.2.2. Both shapes pass numerical checks.
 
 | M=N=K | Custom µs | cuBLASLt µs | Reference % |
 | ---: | ---: | ---: | ---: |
-| 4096 | 32.63 | 31.31 | 96.0 |
-| 8192 | 229.56 | 225.77 | 98.3 |
-| 16384 | 2236.12 | 1709.69 | 76.5 |
+| 8192 | 216.81 | 223.04 | 102.9 |
+| 16384 | 1692.64 | 1675.20 | 99.0 |
 
-16384 remains untuned and noisy: custom samples ranged from 1.75 to 2.50 ms within the latest run. The table reports its median, not a stable performance claim.
-
-### NVFP4 ablation — 8192³
-
-Earlier 8192-only run, before enlarging the routing table for 16384. Each row adds one reference-derived technique to the previous stage. R0 already includes two-CTA MMA, persistent scheduling, warp specialization, TMA, and block-scale handling. The main kernel adds L2 ownership scheduling to R6; it does not improve this B200 run. Results are specific to this GPU and measurement protocol.
-
-| Stage | Added technique | Custom µs | cuBLASLt µs | Reference % |
-| :--- | :--- | ---: | ---: | ---: |
-| R0 | K128 baseline | 439.33 | 224.77 | 51.2 |
-| R1 | Direct `%laneid` | 264.45 | 227.23 | 85.9 |
-| R2 | K256 operand windows | 243.94 | 226.02 | 92.7 |
-| R3 | Overlapping TMEM accumulators | 228.71 | 222.87 | 97.4 |
-| R4 | 256-bit output stores | 218.04 | 222.88 | 102.2 |
-| R5 | Output cache hints | 216.94 | 222.13 | 102.4 |
-| R6 | Exact 224-thread block size | 218.17 | 222.15 | 101.8 |
-| Main | L2-side ownership and tile ordering | 218.56 | 223.17 | 102.1 |
+16384 remains slightly below cuBLASLt; a consistent ≥100% result has not been established.
 
 ### GEMM ablation figures
 

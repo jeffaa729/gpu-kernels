@@ -1,16 +1,10 @@
-"""B200 NVFP4 GEMM and source-matched R0-R6 ablations against cuBLASLt."""
+"""B200 NVFP4 GEMM against cuBLASLt."""
 
-import csv
 import ctypes
-import json
 import math
-import subprocess
-import sys
 
-from common import I, P, ROOT, Operation, bind, checked, library, pointers, save_report, stream, torch
+from common import I, P, Operation, bind, checked, library, pointers, stream, torch
 from reference.python.nvfp4 import dequantize, quantize
-
-STAGES = ("main", "r0", "r1", "r2", "r3", "r4", "r5", "r6")
 
 
 class NVFP4Operation(Operation):
@@ -26,13 +20,12 @@ def cases(args, family):
         raise ValueError("NVFP4 GEMM reference: cublaslt")
     lib = library("nvfp4")
     create = bind(lib, "gpu_kernels_nvfp4_plan_create",
-                  [ctypes.POINTER(P)] + [I] * 4 + [P] * 5 + [ctypes.c_size_t, P])
+                  [ctypes.POINTER(P)] + [I] * 3 + [P] * 5 + [ctypes.c_size_t, P])
     destroy = bind(lib, "gpu_kernels_nvfp4_plan_destroy", [P], None)
     reference = bind(lib, "gpu_kernels_nvfp4_cublas", [P] * 5)
     custom = bind(lib, "gpu_kernels_nvfp4_custom", [P] * 3)
     validate = bind(lib, "gpu_kernels_nvfp4_validate", [P])
     l2_bytes = bind(lib, "gpu_kernels_nvfp4_l2_bytes", [])()
-    stage = -1 if args.stage == "main" else int(args.stage[1:])
     if args.test:
         # The second case exercises ring wraps and persistent accumulator reuse.
         shapes = ((256, 256, 256), (2048, 4096, 2048))
@@ -59,7 +52,7 @@ def cases(args, family):
             for rotation in range(rotations):
                 inputs = operands if rotation == 0 else tuple(tensor.clone() for tensor in operands)
                 context = P()
-                checked(lib, "nvfp4", create(ctypes.byref(context), m, n, k, stage,
+                checked(lib, "nvfp4", create(ctypes.byref(context), m, n, k,
                     *pointers(inputs), workspace.data_ptr(), workspace.numel(), stream()))
                 slots.append((context, inputs))
 
@@ -73,7 +66,7 @@ def cases(args, family):
                 return custom_output
 
             functions = {"custom": lambda: run(0), "cuBLASLt": lambda: run(1)}
-            operation = NVFP4Operation(f"M={m},N={n},K={k}", "nvfp4/fp16", f"TN/{args.stage}",
+            operation = NVFP4Operation(f"M={m},N={n},K={k}", "nvfp4/fp16", "TN",
                                       functions, (expected,), 2e-3, 2e-3)
             operation.lib, operation.validate, operation.context = lib, validate, slots[0][0]
             operation.rotations = rotations
@@ -83,48 +76,3 @@ def cases(args, family):
             torch.cuda.current_stream().synchronize()
             for context, _ in slots:
                 destroy(context)
-
-
-def batch(args):
-    """One rental session: isolate GPU faults by running each stage in its own process."""
-    destination = ROOT / "profiles/runtime/nvfp4_batch"
-    destination.mkdir(parents=True, exist_ok=True)
-    rows, samples, failures = [], [], []
-    jobs = [("r0", True), *((stage, False) for stage in (*STAGES[1:], "main"))]
-    for stage, test in jobs:
-        name = f"{stage}_test" if test else stage
-        command = [sys.executable, str(ROOT / "benchmarks/run.py"), "nvfp4", "--stage", stage,
-                   "--suite", "b200" if stage == "main" else "quick", "--reference", "cublaslt",
-                   "--graph-operations", str(args.graph_operations), "--warmup-ms", str(args.warmup_ms),
-                   "--sample-ms", str(args.sample_ms), "--trials", str(args.trials)]
-        if test:
-            command.append("--test")
-        try:
-            result = subprocess.run(command, cwd=ROOT, capture_output=True, text=True, timeout=180)
-            log = result.stdout + result.stderr
-            failed = result.returncode != 0
-        except subprocess.TimeoutExpired as error:
-            log = "Stage exceeded 180 seconds.\n"
-            for output in (error.stdout, error.stderr):
-                if output:
-                    log += output.decode() if isinstance(output, bytes) else output
-            failed = True
-        (destination / f"{name}.log").write_text(log)
-        print(f"{name}: {'FAIL' if failed else 'PASS'}", flush=True)
-        if failed:
-            failures.append(name)
-            if test:
-                raise SystemExit(f"Baseline correctness failed; stopped to avoid wasting GPU time. Log: {destination / (name + '.log')}")
-            continue
-        if not test:
-            report = "nvfp4" if stage == "main" else f"nvfp4_{stage}"
-            with (ROOT / f"profiles/runtime/{report}.csv").open() as file:
-                rows.extend({**row, "custom_us": float(row["custom_us"]),
-                             "reference_us": float(row["reference_us"]),
-                             "reference_pct": float(row["reference_pct"])} for row in csv.DictReader(file))
-            with (ROOT / f"profiles/runtime/{report}_samples.json").open() as file:
-                samples.append(dict(stage=stage, **json.load(file)))
-    if rows:
-        save_report("nvfp4_batch", rows, samples)
-    if failures:
-        raise SystemExit(f"Failed stages: {', '.join(failures)}. Logs: {destination}")

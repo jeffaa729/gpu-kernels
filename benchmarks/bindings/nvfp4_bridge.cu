@@ -42,7 +42,7 @@ extern "C" const char* gpu_kernels_nvfp4_last_error() {
     return last_error.c_str();
 }
 
-extern "C" int gpu_kernels_nvfp4_plan_create(void** result, int M, int N, int K, int stage,
+extern "C" int gpu_kernels_nvfp4_plan_create(void** result, int M, int N, int K,
                                             const void* A, const void* B, const void* SFA, const void* SFB,
                                             void* workspace, size_t workspace_bytes, cudaStream_t stream) {
     try {
@@ -80,12 +80,7 @@ extern "C" int gpu_kernels_nvfp4_plan_create(void** result, int M, int N, int K,
         plan->algorithm = heuristic.algo;
         plan->workspace = workspace;
         plan->workspace_bytes = heuristic.workspaceSize;
-        const gpu_kernels::Nvfp4Implementation stages[] = {
-            gpu_kernels::nvfp4_r0_implementation(), gpu_kernels::nvfp4_r1_implementation(),
-            gpu_kernels::nvfp4_r2_implementation(), gpu_kernels::nvfp4_r3_implementation(),
-            gpu_kernels::nvfp4_r4_implementation(), gpu_kernels::nvfp4_r5_implementation(),
-            gpu_kernels::nvfp4_r6_implementation()};
-        plan->implementation = stage < 0 ? gpu_kernels::nvfp4_sm100_implementation() : stages[stage];
+        plan->implementation = gpu_kernels::nvfp4_sm100_implementation();
         plan->implementation.prepare(plan->params, static_cast<const uint8_t*>(A), static_cast<const uint8_t*>(B),
             static_cast<const uint8_t*>(SFA), static_cast<const uint8_t*>(SFB), M, N, K, stream);
         *result = plan.release();

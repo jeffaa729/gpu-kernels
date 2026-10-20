@@ -22,15 +22,7 @@ def main():
     parser.add_argument("--warmup-ms", type=int, default=1000)
     parser.add_argument("--sample-ms", type=int, default=20)
     parser.add_argument("--trials", type=int, default=9)
-    parser.add_argument("--stage", choices=("main", "r0", "r1", "r2", "r3", "r4", "r5", "r6"), default="main",
-                        help="NVFP4 implementation snapshot")
-    parser.add_argument("--batch", action="store_true", help="run all B200 stages in isolated processes")
     args = parser.parse_args()
-    if args.batch:
-        if args.family != "nvfp4":
-            parser.error("--batch is for NVFP4 only")
-        importlib.import_module("nvfp4").batch(args)
-        return
     torch.manual_seed(2026)
     torch.backends.cuda.matmul.allow_tf32 = False
     torch.backends.cudnn.allow_tf32 = False
@@ -90,8 +82,7 @@ def main():
             if args.test:
                 print(f"{family}: {count} correctness checks passed")
             elif not args.profile:
-                report = f"nvfp4_{args.stage}" if family == "nvfp4" and args.stage != "main" else family
-                save_report(report, rows, samples)
+                save_report(family, rows, samples)
 
 
 if __name__ == "__main__":
