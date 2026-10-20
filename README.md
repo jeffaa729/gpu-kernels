@@ -21,6 +21,17 @@ GPU_KERNELS_CUDA_ARCH=90 bash scripts/benchmark.sh matmul h100 --reference cubla
 GPU_KERNELS_CUDA_ARCH=90 bash scripts/benchmark.sh flash_attention h100 --reference fa4
 ```
 
+### B200 — NVFP4 GEMM
+
+```bash
+bash scripts/test.sh nvfp4
+bash scripts/benchmark.sh nvfp4 b200 --reference cublaslt
+```
+
+Requires a B200 and CUDA Toolkit 13.1+. Packed E2M1 inputs, VEC16 UE4M3 scales, FP32 accumulation, and row-major FP16 output. `b200` runs 8192 and 16384; `quick` runs 8192. Both backends rotate identical operands across allocations totaling at least twice L2; preparation and a 100 ms per-backend settling interval are excluded from CUDA Graph timing. Results overwrite `profiles/runtime/nvfp4.{csv,md}`.
+
+The main kernel in `kernels/gemm/matmul/sm100.cu` adapts [fast.cu](https://github.com/pranjalssh/fast.cu/tree/2dfe5e26aecfd9e5f27bf9d5837deea01acda24b/gb300/nvfp4) to native B200 K64 MMA, with runtime L2-side ownership, owned 8×8 ordering at 8192, owned 8×4 at 16384, and an eleven-slot scale queue. Existing SM89/SM90 kernels are unchanged.
+
 ### MegaMoE
 
 ```bash
@@ -47,6 +58,17 @@ BF16 GEMM, TN layout, compared with cuBLAS.
 | 2048 | 30.53 | 27.59 | 90.4 |
 | 4096 | 227.58 | 219.14 | 96.3 |
 | 8192 | 1794.82 | 1807.82 | 100.7 |
+
+## GEMM — B200 (SM100)
+
+NVFP4 GEMM, TN layout, FP16 output. Median of 15 paired CUDA Graph timing trials (30 ms minimum samples) on 2026-10-19; CUDA Toolkit 13.1, cuBLASLt 13.2.2.2. Both shapes pass numerical checks.
+
+| M=N=K | Custom µs | cuBLASLt µs | Reference % |
+| ---: | ---: | ---: | ---: |
+| 8192 | 216.81 | 223.04 | 102.9 |
+| 16384 | 1692.64 | 1675.20 | 99.0 |
+
+16384 remains slightly below cuBLASLt; a consistent ≥100% result has not been established.
 
 ### GEMM ablation figures
 
@@ -89,9 +111,9 @@ Analytical minimum-I/O roofline using the same runtimes; nominal H100 SXM ceilin
 
 <img src="assets/attention/sm90_roofline_analytical.png" alt="H100 SXM analytical minimum-I/O FlashAttention roofline, A1-A8 and official FA4" width="800">
 
-## MegaMoE — 4× H100 SXM (EP4)
+## MegaMoE — 4× H200 NVL (EP4)
 
-Four NVIDIA H100 SXM GPUs, 80 GB HBM3 each, with NVLink `NV18` between every pair. BF16 inputs, weights, and outputs; FP32 accumulation. V4-Flash-shaped routed MoE layer, not full-model inference.
+Four NVIDIA H200 NVL GPUs, NVLink `NV6` between every pair, 600 W power limit per GPU. BF16 inputs, weights, and outputs; FP32 accumulation. V4-Flash-shaped routed MoE layer.
 
 | Parameter | Value |
 | :--- | ---: |
@@ -104,15 +126,16 @@ Four NVIDIA H100 SXM GPUs, 80 GB HBM3 each, with NVLink `NV18` between every pai
 
 Reference: DeepEP V2 dispatch/combine + DeepGEMM BF16 grouped GEMMs + weighted SwiGLU.
 
-Measured on 2026-10-17. Complete routed MoE layer: median of 15 CUDA Graph timing trials, 10 operations per replay, using the slowest rank per sample.
+Measured on 2026-10-19. Complete routed MoE layer: median of 31 CUDA Graph timing trials, 10 operations per replay, using the slowest rank per sample.
 
 | Tokens/GPU | Custom µs | DeepEP V2 + DeepGEMM µs | Reference % |
 | ---: | ---: | ---: | ---: |
-| 1 | 242.89 | 302.37 | 124.5 |
-| 128 | 1187.59 | 1333.61 | 112.3 |
-| 512 | 1307.33 | 1473.56 | 112.7 |
-| 8192 | 7691.06 | 6920.32 | 90.0 |
-| 32768 | 23566.40 | 26529.34 | 112.6 |
+| 1 | 194.22 | 290.31 | 149.5 |
+| 64 | 887.05 | 1068.29 | 120.4 |
+| 256 | 910.07 | 1146.66 | 126.0 |
+| 1024 | 1053.08 | 1440.81 | 136.8 |
+| 2048 | 1852.50 | 2257.62 | 121.9 |
+| 4096 | 3216.85 | 4013.21 | 124.8 |
 
 ## MegaMoE — 2× H200 NVL (EP2)
 

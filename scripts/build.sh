@@ -11,6 +11,15 @@ if [[ -z "$nvcc_bin" ]]; then
     exit 1
 fi
 cuda_arch="${GPU_KERNELS_CUDA_ARCH:-}"
+# Build NVFP4 alone: Hopper-only WGMMA sources are not SM100-compatible.
+if [[ "${1:-}" == gpu_kernels_nvfp4_bench ]]; then
+    [[ "$cuda_arch" != 100 ]] || cuda_arch=100a
+    cmake -S "$repo_root/benchmarks/nvfp4" -B "$repo_root/build/nvfp4" \
+        -DCMAKE_BUILD_TYPE=Release -DCMAKE_CUDA_ARCHITECTURES="${cuda_arch:-100a}" \
+        -DCMAKE_CUDA_COMPILER="$nvcc_bin"
+    cmake --build "$repo_root/build/nvfp4" -j "${GPU_KERNELS_BUILD_JOBS:-6}" --target "$@"
+    exit 0
+fi
 if [[ -z "$cuda_arch" ]] && command -v nvidia-smi >/dev/null; then
     cuda_arch="$(nvidia-smi --query-gpu=compute_cap --format=csv,noheader 2>/dev/null | head -n 1 | tr -d '. ' || true)"
 fi

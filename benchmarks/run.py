@@ -9,11 +9,11 @@ FAMILIES = ("matmul", "flash_attention")
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("family", choices=(*FAMILIES, "all"),
+    parser.add_argument("family", choices=(*FAMILIES, "nvfp4", "all"),
                         type=lambda x: {"gemm": "matmul"}.get(x, x))
-    parser.add_argument("--suite", choices=("quick", "full", "h100"), default="quick")
+    parser.add_argument("--suite", choices=("quick", "full", "h100", "b200"), default="quick")
     parser.add_argument("--test", action="store_true", help="check native results against PyTorch; no timing")
-    parser.add_argument("--reference", help="cublas for GEMM; pytorch, fa2, fa3, fa4, or all for FlashAttention")
+    parser.add_argument("--reference", help="cublas for GEMM; cublaslt for NVFP4; pytorch, fa2, fa3, fa4, or all for FlashAttention")
     parser.add_argument("--operation", help="run only TN GEMM or FlashAttention forward")
     parser.add_argument("--profile", action="store_true", help="one uncaptured call inside cudaProfilerStart/Stop")
     parser.add_argument("--backend", choices=("custom", "reference", "all"), default="all",
@@ -73,6 +73,9 @@ def main():
                     rows.extend(record(operation, timings))
                     samples.append(dict(size=operation.size, dtype=operation.dtype,
                                         operation=operation.name, samples_us=timings))
+                    if family == "nvfp4":
+                        samples[-1].update(rotation_sets=operation.rotations, graph_operations=args.graph_operations,
+                                           backend_settle_ms=operation.backend_settle_ms)
             stream.synchronize()
             if not count:
                 parser.error("No matching operations.")
