@@ -15,6 +15,9 @@ def cases(args, family):
     checked(lib, "operator", bind(lib, "gpu_kernels_cublas_init", [])())
     gemm = bind(lib, "gpu_kernels_gemm", [P] * 3 + [I] * 5 + [P])
     dtypes = (torch.bfloat16,) if is_sm90 else (torch.float32, torch.bfloat16)
+    if args.dtype:
+        selected = torch.bfloat16 if args.dtype == "bf16" else torch.float32
+        dtypes = tuple(dtype for dtype in dtypes if dtype == selected)
 
     try:
         for dtype in dtypes:
@@ -27,6 +30,9 @@ def cases(args, family):
                           (256, 512, 192))
                 if dtype == torch.float32:
                     shapes += ((17, 33, 65),)
+                else:
+                    # First-stage-only execution and an odd double-buffer tail.
+                    shapes += ((128, 256, 32), (128, 256, 96))
             else:
                 sizes = (2048,) if args.suite == "quick" else (2048, 4096, 8192)
                 shapes = tuple((n, n, n) for n in sizes)

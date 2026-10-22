@@ -14,6 +14,7 @@ def main():
     parser.add_argument("--suite", choices=("quick", "full", "h100", "b200"), default="quick")
     parser.add_argument("--test", action="store_true", help="check native results against PyTorch; no timing")
     parser.add_argument("--reference", help="cublas for GEMM; cublaslt for NVFP4; pytorch, fa2, fa3, fa4, or all for FlashAttention")
+    parser.add_argument("--dtype", choices=("fp32", "bf16"), help="select GEMM precision")
     parser.add_argument("--operation", help="run only TN GEMM or FlashAttention forward")
     parser.add_argument("--profile", action="store_true", help="one uncaptured call inside cudaProfilerStart/Stop")
     parser.add_argument("--backend", choices=("custom", "reference", "all"), default="all",

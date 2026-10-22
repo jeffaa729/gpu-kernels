@@ -11,6 +11,7 @@ Times are in microseconds. **Reference % = reference time / custom time × 100.*
 ```bash
 uv sync --locked
 GPU_KERNELS_CUDA_ARCH=89 bash scripts/benchmark.sh matmul full --reference cublas
+GPU_KERNELS_CUDA_ARCH=89 bash scripts/benchmark.sh matmul full --dtype bf16 --reference cublas --warmup-ms 10000 --trials 21 --sample-ms 30
 GPU_KERNELS_CUDA_ARCH=89 bash scripts/benchmark.sh flash_attention full --reference fa2
 ```
 
@@ -44,10 +45,14 @@ bash scripts/benchmark_moe.sh 2 --trials 31
 
 FP32 and BF16 GEMM, TN layout, compared with cuBLAS.
 
+BF16: one fixed 128×128 kernel for all sizes. Results from 2026-10-22 use 21 CUDA Graph timing trials, 10 operations per replay, and 10 seconds of warmup per shape. FP32 results are unchanged from the earlier run.
+
 | M=N=K | dtype | Custom µs | cuBLAS µs | Reference % |
 | ---: | :--- | ---: | ---: | ---: |
 | 2048 | FP32 | 2600.45 | 2546.98 | 97.9 |
-| 2048 | BF16 | 755.92 | 644.02 | 85.2 |
+| 2048 | BF16 | 791.32 | 755.77 | 95.5 |
+| 4096 | BF16 | 7470.29 | 7346.79 | 98.3 |
+| 8192 | BF16 | 59038.00 | 58924.34 | 99.8 |
 
 ## GEMM — H100 SXM (SM90)
 
