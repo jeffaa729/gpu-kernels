@@ -7,7 +7,7 @@ if [[ $# == 0 || "$1" == "--help" || "$1" == "-h" ]]; then
     echo "usage: bash scripts/benchmark.sh FAMILY [quick|full|h100|b200] [options]"
     echo "families: matmul (gemm), flash_attention, nvfp4, all (matmul + flash_attention)"
     echo "options: --reference cublas|cublaslt|pytorch|fa2|fa3|fa4|all, --operation NAME"
-    echo "matmul: cuBLAS is the only reference"
+    echo "matmul: cuBLAS is the only reference; --dtype fp32|bf16 selects precision"
     echo "MegaMoE baseline: bash scripts/benchmark_moe.sh [2|4] [options]"
     exit 0
 fi
