@@ -24,6 +24,8 @@ void driver_check(CUresult result) {
 
 namespace ptx {
 
+// Convert generic pointers to the 32-bit shared-address form used by TMA and
+// cluster barriers; peer mapping then selects the corresponding CTA allocation.
 template <typename T>
 static __device__ __forceinline__ uint32_t to_shared(T* ptr) {
     return static_cast<uint32_t>(__cvta_generic_to_shared(ptr));
@@ -76,6 +78,8 @@ static __device__ __forceinline__ void mbar_arrive_cluster_release(
                  :: "r"(mapped));
 }
 
+// Finish the first TMEM drain band before a warp leader returns ownership of
+// the overlapping accumulator region to the issuing CTA.
 static __device__ __forceinline__ void tcgen05_wait_ld_then_arrive_release(
         uint64_t* bar, uint32_t cta_rank, bool do_arrive) {
     const uint32_t mapped = mapa_shared_cluster(to_shared(bar), cta_rank);
@@ -99,6 +103,8 @@ static __device__ __forceinline__ void mbar_wait_parity(
         :: "r"(to_shared(bar)), "r"(parity));
 }
 
+// Route transaction accounting to the even CTA's barrier, where byte completion
+// from both cluster members is combined with the elected producer arrival.
 static __device__ __forceinline__ void mbar_arrive_expect_tx_cluster(
         uint64_t* bar, uint32_t bytes) {
     const uint32_t mbar_addr = to_shared(bar) & 0xFEFFFFFFu;
@@ -216,6 +222,8 @@ static __device__ __forceinline__ void mbar_wait_relaxed(
 }
 
 
+// Copy each scale atom from shared storage into the TMEM scale region; the MMA
+// issuer orders these copies ahead of the instructions that consume the scales.
 static __device__ __forceinline__ void cp_sf(
         uint32_t el, uint32_t dst, uint32_t lo, uint32_t hi) {
     const uint64_t desc = (uint64_t(hi) << 32) | uint64_t(lo);
@@ -226,6 +234,8 @@ static __device__ __forceinline__ void cp_sf(
         :: "r"(dst), "l"(desc), "r"(el) : "memory");
 }
 
+// Attach a barrier arrival to completion of preceding tcgen05 operations and
+// multicast that signal to the selected CTAs, releasing slots at hardware completion.
 static __device__ __forceinline__ void commit_consumed(
         uint32_t el, uint32_t smbase, uint32_t mb_off, uint16_t mask) {
     asm volatile(
@@ -236,6 +246,8 @@ static __device__ __forceinline__ void commit_consumed(
         :: "r"(smbase + mb_off), "h"(mask), "r"(el) : "memory");
 }
 
+// Two-CTA block-scaled MMA consumes packed E2M1 operands and UE4M3 scales for
+// groups of 16 K values, producing FP32 accumulators in TMEM with native K64 steps.
 static __device__ __forceinline__ void mma_cell(
         uint32_t el, uint32_t d,
         uint32_t desc_a_lo, uint32_t desc_a_hi,
@@ -264,6 +276,8 @@ constexpr int AB_K = 2 * AB_BYTES, SF_K = 128;
 constexpr int AB_STRIDE = BM * AB_BYTES;
 constexpr int SFA_BYTES = 1024, SFB_BYTES = 2048;
 constexpr int SF_COLUMNS = 24, TMEM_COLUMNS = 512;
+// Accumulator ranges [0,256) and [232,488) overlap by 24 TMEM columns, leaving
+// [488,512) for scales; draining that edge first enables output/compute overlap.
 constexpr int ACC_BUFFERS = 2;
 constexpr int ACC_STRIDE = 232;
 constexpr int SF_BASE = 488;
@@ -300,6 +314,8 @@ __device__ __forceinline__ uint64_t scale_descriptor(uint32_t base) {
     return uint64_t((base & 0x3FFFFU) >> 4) | 0x400800010000ULL;
 }
 
+// Independent cursors select A/B and scale slots, with parity tracking each
+// queue's wraparound generation across persistent output tiles.
 __device__ __forceinline__ void advance(int& slot, int& phase, int count) {
     if (++slot == count) { slot = 0; phase ^= 1; }
 }
@@ -363,6 +379,8 @@ __device__ __forceinline__ void compute_tile(SharedStorage& smem, uint32_t tmem,
 __constant__ int route_table[4096], expected_side[128], sm_side[256];
 __device__ unsigned placement_errors;
 
+// Broadcast a warp-uniform tile ID through a hardware reduction, keeping the
+// TMEM drain and vector-store address calculation on the same output tile.
 __device__ __forceinline__ int uniform_tile(int work) {
     unsigned tile;
     asm("redux.sync.min.u32 %0, %1, 0xffffffff;" : "=r"(tile) : "r"(route_table[work]));
@@ -403,6 +421,8 @@ void gemm_kernel(__half* C, const __grid_constant__ CUtensorMap A_map,
             ptx::mbar_init(&smem.hdr.sf_free[i], 1);
         }
         ptx::mbar_init(&smem.hdr.acc_ready, 1);
+        // Four output-warp leaders per CTA contribute eight arrivals to release
+        // the overlap; deallocation later collects all 32 lanes of the peer warp.
         ptx::mbar_init(&smem.hdr.acc_free, 8);
         ptx::mbar_init(&smem.hdr.dealloc, 32);
         ptx::fence_mbarrier_init_release_cluster();
@@ -411,6 +431,8 @@ void gemm_kernel(__half* C, const __grid_constant__ CUtensorMap A_map,
 
     uint32_t tmem = 0;
     if (warp <= 4) {
+        // Output warps and the issuer rendezvous after collective allocation so
+        // their persistent roles share the published TMEM base address.
         if (warp == 0) ptx::tcgen05_alloc_2sm(ptx::to_shared(&smem.hdr.tmem), TMEM_COLUMNS);
         ptx::bar_sync(2, 160);
         tmem = smem.hdr.tmem;
@@ -436,6 +458,8 @@ void gemm_kernel(__half* C, const __grid_constant__ CUtensorMap A_map,
         const int last = (slot + AB_STAGES - 1) % AB_STAGES;
         ptx::mbar_wait_parity(&smem.hdr.ab_free[last], slot == 0 ? phase : phase ^ 1);
     } else if (warp == 6 && ptx::lane_id() == 0) {
+        // Scale TMA advances in K128 windows independently of K256 operand TMA;
+        // SFA stays local while each SFB partition is delivered to both CTAs.
         int slot = 0, phase = 1;
         for (int work = cluster; work < tiles; work += clusters) {
             const int tile = route_table[work];
@@ -454,6 +478,8 @@ void gemm_kernel(__half* C, const __grid_constant__ CUtensorMap A_map,
         const int last = (slot + SF_STAGES - 1) % SF_STAGES;
         ptx::mbar_wait_parity(&smem.hdr.sf_free[last], slot == 0 ? phase : phase ^ 1);
     } else if (warp == 4 && rank == 0 && ptx::lane_id() == 0) {
+        // One elected issuer drives the paired-CTA MMA stream, while four output
+        // warps in each CTA drain the other accumulator buffer concurrently.
         Cursor ab, sf;
         int parity = 1;
         for (int work = cluster; work < tiles; work += clusters)
@@ -549,6 +575,8 @@ std::vector<int> pocket_order(int rows, int columns, int height, int width) {
     return order;
 }
 
+// Calibrate requester-latency groups and cluster placement during preparation,
+// then cache a tile route that keeps nearby output work on the same L2 side.
 void prepare_schedule(const Nvfp4Params& p, int sms, cudaStream_t stream) {
     static int last_device = -1, last_M = 0, last_N = 0;
     int device;
@@ -657,6 +685,8 @@ CUtensorMap operand_map(const uint8_t* pointer, int rows, int K) {
     return map;
 }
 
+// Describe the existing VEC16 scale layout as 4D byte tiles; each transfer fills
+// a K128 scale window in the layout expected by the shared-to-TMEM copies.
 CUtensorMap scale_map(const uint8_t* pointer, int rows, int K) {
     const uint64_t shape[4] = {128, 4, uint64_t(K / 64), uint64_t(rows / 128)};
     const uint64_t strides[3] = {128, 512, uint64_t(K / 64) * 512};

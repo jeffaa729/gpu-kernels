@@ -21,6 +21,8 @@ inline void validate_head_size(int head_size) {
 
 namespace tensor_core {
 
+// A 128-thread CTA owns 64 query rows, with one 16-row stripe per warp.
+// Each key tile supplies 64 tokens while every output row retains all D128 features.
 constexpr int BM = 64;
 constexpr int BN = 64;
 constexpr int D = HEAD_SIZE;
@@ -35,6 +37,8 @@ constexpr int HEAD_K_TILES = D / MMA_K;
 constexpr int TOKEN_K_TILES = BN / MMA_K;
 constexpr int VECTOR_ELEMENTS = 8;
 
+// XOR permutes eight-BF16 chunks using the row's low bits, preserving aligned
+// vector accesses while spreading matrix-load traffic across shared banks.
 template <int STRIDE = D>
 __device__ __forceinline__ int swizzle(int offset) {
     return offset ^ (((offset / STRIDE) & 7) << 3);
@@ -44,19 +48,26 @@ __device__ __forceinline__ unsigned int shared_address(const void* pointer) {
     return static_cast<unsigned int>(__cvta_generic_to_shared(pointer));
 }
 
+// Copy eight BF16 values directly into shared storage; the L2 hint controls
+// prefetch behavior while the per-thread copy width remains 16 bytes.
 __device__ __forceinline__ void cp_async_bf16x8(__nv_bfloat16* destination, const __nv_bfloat16* source) {
     const unsigned int destination_address = shared_address(destination);
     asm volatile("cp.async.cg.shared.global.L2::128B [%0], [%1], 16;\n" ::"r"(destination_address), "l"(source));
 }
 
+// Group this thread's asynchronous copies so a later wait can establish completion.
 __device__ __forceinline__ void cp_async_commit() {
     asm volatile("cp.async.commit_group;\n" ::);
 }
 
+// Drain the issuing thread's copy groups; callers then use a CTA barrier to
+// publish every thread's completed vectors before cooperative matrix loads.
 __device__ __forceinline__ void cp_async_wait() {
     asm volatile("cp.async.wait_group 0;\n" ::);
 }
 
+// Cooperatively load four 8x8 BF16 matrices into the warp-distributed registers
+// expected by MMA; the transposed variant arranges the row-major V operand.
 __device__ __forceinline__ void load_matrix_x4(unsigned int (&fragment)[4], unsigned int address) {
     asm volatile(
         "ldmatrix.sync.aligned.m8n8.x4.shared.b16 "
@@ -73,6 +84,8 @@ __device__ __forceinline__ void load_matrix_x4_transpose(unsigned int (&fragment
         : "r"(address));
 }
 
+// A warp computes one 16x8 output update over K16 using BF16 operands and FP32
+// accumulation; this primitive serves both the feature-reduction QK and key-reduction PV.
 __device__ __forceinline__ void mma(float (&accumulator)[4], const unsigned int (&left)[4], const unsigned int* right) {
     asm volatile(
         "mma.sync.aligned.m16n8k16.row.col.f32.bf16.bf16.f32 "
@@ -97,6 +110,8 @@ __device__ __forceinline__ int tensor_index(int batch, int token, int head, int 
     return ((batch * sequence_length + token) * heads + head) * D + column;
 }
 
+// Each thread issues eight aligned vectors at compile-time-known offsets;
+// neighboring threads cover adjacent feature segments within the same token.
 __device__ __forceinline__ void copy_bf16_tile(__nv_bfloat16* shared, const __nv_bfloat16* global, int batch, int first_token, int head, int sequence_length,
                                                int heads) {
     constexpr int VECTORS = BM * D / VECTOR_ELEMENTS;
@@ -178,6 +193,8 @@ __device__ __forceinline__ void store_pair(__nv_bfloat16* destination, float2 va
 
 constexpr float LOG2E = 1.4426950408889634F;
 
+// Pack FP32 exponential weights into BF16 pairs in the PV A-operand layout,
+// keeping the intermediate probabilities in registers between the two GEMMs.
 __device__ __forceinline__ void pack_score_matrix(unsigned int (&fragments)[TOKEN_K_TILES][4], const float (&scores)[SCORE_N_TILES][4]) {
 #pragma unroll
     for (int tile = 0; tile < TOKEN_K_TILES; ++tile) {
@@ -189,6 +206,8 @@ __device__ __forceinline__ void pack_score_matrix(unsigned int (&fragments)[TOKE
     }
 }
 
+// Specialize the diagonal/initial tile separately from earlier full tiles.
+// Four-lane quads reduce each row's maximum and sum while output retains its numerator.
 template <bool FIRST_TILE, bool MASKED_TILE>
 __device__ __forceinline__ void online_softmax_tile(float (&scores)[SCORE_N_TILES][4], float (&output_accumulators)[OUTPUT_N_TILES][4],
                                                     float (&row_max)[2], float (&row_sum)[2], const __nv_bfloat16* shared_value, int warp_row,
@@ -220,6 +239,8 @@ __device__ __forceinline__ void online_softmax_tile(float (&scores)[SCORE_N_TILE
     } else {
         next_max[0] = fmaxf(row_max[0], current_max[0]);
         next_max[1] = fmaxf(row_max[1], current_max[1]);
+        // Move the accumulated numerator and denominator to the new exponent
+        // base together, preserving their ratio as additional keys are processed.
         const float previous_scale[2] = {exp2f((row_max[0] - next_max[0]) * scale_log2),
                                          exp2f((row_max[1] - next_max[1]) * scale_log2)};
 #pragma unroll
@@ -233,6 +254,8 @@ __device__ __forceinline__ void online_softmax_tile(float (&scores)[SCORE_N_TILE
         row_sum[1] *= previous_scale[1];
     }
 
+    // scale_log2 folds attention scaling and log2(e) into one factor, allowing
+    // fused multiply-add followed by base-2 exponentials for the online update.
     float local_sum[2] = {};
     const float next_max_scaled[2] = {next_max[0] * scale_log2, next_max[1] * scale_log2};
 #pragma unroll
@@ -278,6 +301,8 @@ __global__ __launch_bounds__(THREADS, 2) void flash_attention_forward_tensor_cor
     const int batch_head = blockIdx.y;
     const int batch = batch_head / query_heads;
     const int query_head = batch_head % query_heads;
+    // Adjacent query-head groups share a physical KV head for GQA/MQA, while
+    // each CTA keeps its own query rows and softmax state.
     const int key_value_head = query_head / (query_heads / key_value_heads);
     const int first_query = blockIdx.x * BM;
     const int warp_row = warp * MMA_M;
@@ -289,6 +314,8 @@ __global__ __launch_bounds__(THREADS, 2) void flash_attention_forward_tensor_cor
     cp_async_wait();
     __syncthreads();
 
+    // Retain Q fragments across the complete causal KV traversal, amortizing
+    // their shared-to-register loads over every score tile handled by this CTA.
     unsigned int query_fragments[HEAD_K_TILES][4];
     load_left_fragments(query_fragments, shared_query, warp_row, lane);
     float output_accumulators[OUTPUT_N_TILES][4] = {};
@@ -335,6 +362,8 @@ __global__ __launch_bounds__(THREADS, 2) void flash_attention_forward_tensor_cor
     const int local_bottom_query = local_top_query + 8;
     const int top_query = first_query + warp_row + lane / 4;
     const int bottom_query = top_query + 8;
+    // Hoist one reciprocal per row and reuse it across all D128 output features;
+    // one lane per quad separately writes that row's natural-log LSE.
     const float inverse_sum[2] = {1.0F / row_sum[0], 1.0F / row_sum[1]};
 #pragma unroll
     for (int tile = 0; tile < OUTPUT_N_TILES; ++tile) {

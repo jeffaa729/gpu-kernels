@@ -1,3 +1,5 @@
+// Two persistent compute phases fuse peer-input dispatch with FC1/SwiGLU,
+// then FC2 with peer-output scatter; a global activation pool connects the phases.
 #include "fused_moe.h"
 #include "cuda_common.h"
 #include "common.cuh"
@@ -169,6 +171,8 @@ struct Shared {
     uint64_t work_full[QUEUE], work_empty[QUEUE], math_order[2], epi_order[2];
     Work work[QUEUE];
     int sizes[MAX_EXPERTS], starts[MAX_EXPERTS + 1];
+    // CUTLASS owns the active transaction/release barriers for the five-stage
+    // operand ring; work and math/epilogue handoffs use the dedicated barriers above.
     Pipeline::SharedStorage pipeline;
 };
 static_assert(sizeof(Shared<64>) <= 232448 && sizeof(Shared<128>) <= 232448);
@@ -228,6 +232,8 @@ __global__ __launch_bounds__(NTHREADS, 1) void kernel(MoePeers peers, MoeShape s
     }
     if (tid < 4) Barrier::init(&shared.pull[tid], 1);
     if (tid < QUEUE) {
+        // Each descriptor has one publishing scheduler and four consuming leaders.
+        // Math/epilogue handoffs collect a full 128-thread warpgroup before transfer.
         Barrier::init(&shared.work_full[tid], 1);
         Barrier::init(&shared.work_empty[tid], 4);
         Barrier::init(&shared.math_order[tid], 128);
@@ -240,10 +246,14 @@ __global__ __launch_bounds__(NTHREADS, 1) void kernel(MoePeers peers, MoeShape s
     params.role = tid < 256 ? Pipeline::ThreadCategory::Consumer : Pipeline::ThreadCategory::Producer;
     params.is_leader = tid == 288 || tid == 320;
     params.num_producers = 2;
+    // The two math groups alternate complete tasks, so each stage is released
+    // by the 128 threads of the group that owns its current output tile.
     params.num_consumers = 128;
     Pipeline pipeline(shared.pipeline, params, Shape<_2, _1, _1>{});
     cutlass::arch::fence_barrier_init();
     __syncthreads();
+    // Rendezvous across both CTAs after initialization before issuing multicast
+    // transfers that can signal the peer's shared transaction barriers.
     cute::cluster_arrive_relaxed();
     cute::cluster_wait();
     // Register redistribution: non-math warps release registers so the two
@@ -279,6 +289,8 @@ __global__ __launch_bounds__(NTHREADS, 1) void kernel(MoePeers peers, MoeShape s
                     const bool duplicate = expert != peers.carrier_experts[source];
                     int64_t carrier_row = -1;
                     if (duplicate) {
+                        // A published carrier row is a one-way readiness signal:
+                        // duplicates wait with nanosleep, then reuse the completed local payload.
                         // Acquire/release publication makes the carrier payload
                         // visible before another CTA reads it through the async proxy.
                         auto carrier = cuda::atomic_ref<int64_t, cuda::thread_scope_device>(peers.carrier_rows[source]);
@@ -305,6 +317,8 @@ __global__ __launch_bounds__(NTHREADS, 1) void kernel(MoePeers peers, MoeShape s
                     }
                     if (!duplicate)
                         cuda::atomic_ref<int64_t, cuda::thread_scope_device>(peers.carrier_rows[source]).store(peers.offsets[expert] + local_row, cuda::memory_order_release);
+                    // Count completed token rows in this expert tile; the activation
+                    // loader acquires the count before starting its TMA reads.
                     cuda::atomic_ref<int, cuda::thread_scope_device>(peers.ready[expert * mtiles + local_row / TN]).fetch_add(1, cuda::memory_order_release);
                 }
                 __syncwarp();
@@ -330,6 +344,8 @@ __global__ __launch_bounds__(NTHREADS, 1) void kernel(MoePeers peers, MoeShape s
             shared.work[slot] = work;
             Barrier::arrive(&shared.work_full[slot]);
         }
+        // Publish an end-of-stream descriptor through the same queue protocol so
+        // loaders and both math groups retire after consuming the final task.
         const int slot = index % QUEUE;
         if (index >= QUEUE) Barrier::wait(&shared.work_empty[slot], index / QUEUE % 2 ^ 1);
         shared.work[slot] = Work{-1, 0, 0, 0};
@@ -374,6 +390,8 @@ __global__ __launch_bounds__(NTHREADS, 1) void kernel(MoePeers peers, MoeShape s
                 ++write_state;
             }
         }
+        // Drain outstanding operand ownership before a loader exits, keeping
+        // shared buffers alive until their last math consumer has released them.
         pipeline.producer_tail(write_state);
         return;
     }
@@ -440,6 +458,8 @@ __global__ __launch_bounds__(NTHREADS, 1) void kernel(MoePeers peers, MoeShape s
         pipeline.consumer_release(release_state);
         // The peer may start WGMMA while this group converts and stores its output.
         Barrier::arrive(&shared.math_order[1 - wg]);
+        // Serialize epilogue ownership while the peer runs its GEMM; this also
+        // protects the shared retiling buffer used by FC2 peer-output stores.
         if (wg != 0 || owned != 0) Barrier::wait(&shared.epi_order[wg], (owned - (wg == 0)) & 1);
         warpgroup_fence_operand(accum);
         if constexpr (First) {
@@ -479,6 +499,8 @@ __global__ __launch_bounds__(NTHREADS, 1) void kernel(MoePeers peers, MoeShape s
                     C(token, col, wg) = BF16(gate / (1.f + expf(-gate)) * up * weight);
                 }
             }
+            // Publish all weighted-activation writes to the TMA proxy, rendezvous
+            // the owning warpgroup, then let its leader issue the global store.
             tma_store_fence();
             cutlass::arch::NamedBarrier::sync(128, 2 + wg);
             if (lane == 0) {
@@ -520,6 +542,8 @@ __global__ __launch_bounds__(NTHREADS, 1) void kernel(MoePeers peers, MoeShape s
             }
             cutlass::arch::NamedBarrier::sync(128, 6 + wg);
         }
+        // Every thread returns epilogue ownership after its group's stores and
+        // shared-buffer reads complete, advancing the peer's handoff generation.
         Barrier::arrive(&shared.epi_order[1 - wg]);
         ++owned;
     }
