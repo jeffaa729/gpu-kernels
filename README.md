@@ -75,18 +75,6 @@ NVFP4 GEMM, TN layout, FP16 output. Median of 15 paired CUDA Graph timing trials
 
 16384 remains slightly below cuBLASLt; a consistent ≥100% result has not been established.
 
-### GEMM ablation figures
-
-Roofline figures use measured runtimes, analytical minimum-I/O estimates, and modeled hardware ceilings—not measured DRAM traffic.
-
-RTX 4060 Laptop: FP32 F0–F7 and BF16 T0–T4, square matrices from 256 to 8192.
-
-<img src="assets/roofline/sm89_analytical.png" alt="RTX 4060 Laptop analytical GEMM rooflines, FP32 and BF16 versus cuBLAS" width="800">
-
-H100: BF16 H0–H8, square matrices from 512 to 8192.
-
-<img src="assets/roofline/sm90_analytical.png" alt="H100 analytical BF16 GEMM roofline, incremental optimization stages versus cuBLAS" width="800">
-
 ## FlashAttention forward — RTX 4060 Laptop (SM89)
 
 Causal BF16 MHA: `B=1, T=512, Hq=Hkv=8, D=128`.
@@ -105,16 +93,6 @@ Causal BF16 MHA: `B=4, Hq=Hkv=8, D=128`. Median of 35 CUDA Graph timing trials o
 | 4096 | 265.06 | 263.87 | 99.5 |
 | 8192 | 975.55 | 971.83 | 99.6 |
 | 16384 | 3717.90 | 3690.64 | 99.3 |
-
-### FlashAttention ablation figures
-
-H100, cumulative stages A1–A8 versus FlashAttention-4: causal BF16 MHA, `B=4, H=8, D=128`, `T ∈ {512,1024,2048,4096,8192}`.
-
-<img src="assets/attention/sm90_ablation.png" alt="H100 MHA A1-A8 ablation versus official FlashAttention-4" width="800">
-
-Analytical minimum-I/O roofline using the same runtimes; nominal H100 SXM ceilings are not adjusted for the run's 525 W power limit.
-
-<img src="assets/attention/sm90_roofline_analytical.png" alt="H100 SXM analytical minimum-I/O FlashAttention roofline, A1-A8 and official FA4" width="800">
 
 ## MegaMoE — 4× H200 NVL (EP4)
 

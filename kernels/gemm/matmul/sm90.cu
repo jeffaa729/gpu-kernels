@@ -43,8 +43,6 @@ static_assert(BM / NUM_CONSUMERS == WGMMA_M);
 static_assert(BK == 64 && BN == 256 && STAGES == 3);
 static_assert(BK % WGMMA_K == 0);
 
-// Matmul7 reuses this queue across logical output tiles assigned to one CTA.
-// Both operands are K-contiguous, matching fast.cu's A[M,K] and B[N,K].
 struct SharedStorage {
     alignas(SMEM_ALIGNMENT) bf16 A[STAGES][BM * BK];
     alignas(SMEM_ALIGNMENT) bf16 B[STAGES][BN * BK];
