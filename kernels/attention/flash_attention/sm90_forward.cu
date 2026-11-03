@@ -33,6 +33,8 @@ constexpr float LOG2E = 1.4426950408889634F;
 // Keep P in registers; BF16 V uses an MN-major descriptor,
 // without a physical transpose. TMA and WGMMA share the SW128 layout.
 struct SharedStorage {
+    // Q occupies 32 KiB for the CTA lifetime; K and V each use two 32-KiB time
+    // slots. The inner [2] splits D128 into D64 feature bands within each tile.
     alignas(SMEM_ALIGNMENT) bf16 Q[2][BM * HALF_D];
     alignas(SMEM_ALIGNMENT) bf16 K[STAGES][2][BN * HALF_D];
     // Epilogue O aliases V. Their lifetimes are disjoint after all consumers finish
@@ -72,14 +74,20 @@ __device__ __forceinline__ uint32_t barrier_address(const uint64_t* barrier) {
     return static_cast<uint32_t>(__cvta_generic_to_shared(barrier));
 }
 
+// Initialize the arrival count for each repeating barrier phase; Full uses one
+// producer arrival and Empty uses one release from each consumer warpgroup.
 __device__ __forceinline__ void barrier_init(uint64_t* barrier, uint32_t arrivals) {
     asm volatile("mbarrier.init.shared::cta.b64 [%0], %1;" :: "r"(barrier_address(barrier)), "r"(arrivals) : "memory");
 }
 
+// Release a consumer's ownership of a shared slot after its WGMMA reads finish;
+// startup arrivals grant the producer its initial set of writable slots.
 __device__ __forceinline__ void barrier_arrive(uint64_t* barrier) {
     asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" :: "r"(barrier_address(barrier)) : "memory");
 }
 
+// Register the producer arrival plus the expected TMA bytes in the current
+// Full phase, so consumers observe readiness after the complete tile arrives.
 __device__ __forceinline__ void barrier_expect_bytes(uint64_t* barrier, uint32_t bytes) {
     asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
                  :: "r"(barrier_address(barrier)), "r"(bytes) : "memory");
@@ -109,6 +117,8 @@ __device__ __forceinline__ void tma_load(bf16* destination, const CUtensorMap* m
         :: "r"(static_cast<uint32_t>(__cvta_generic_to_shared(destination))), "l"(map), "r"(barrier_address(barrier)), "r"(token), "r"(head), "r"(batch), "l"(cache_hint) : "memory");
 }
 
+// Stage chooses a shared-memory address; parity flips after a full ring traversal
+// to distinguish successive uses of that slot's transaction and release barriers.
 __device__ __forceinline__ void advance_stage(int& stage, int& phase) {
     if (++stage == STAGES) {
         stage = 0;
@@ -137,14 +147,18 @@ __device__ __forceinline__ uint64_t advance_descriptor(uint64_t descriptor, uint
     return (descriptor & 0xffffffff00000000ULL) | (static_cast<uint32_t>(descriptor) + offset);
 }
 
+// Order prior register accesses before the next asynchronous WGMMA instruction.
 __device__ __forceinline__ void warpgroup_fence() {
     asm volatile("wgmma.fence.sync.aligned;" ::: "memory");
 }
 
+// Finish the current issue batch so later waits can track QK and PV independently.
 __device__ __forceinline__ void warpgroup_commit() {
     asm volatile("wgmma.commit_group.sync.aligned;" ::: "memory");
 }
 
+// Permit at most Pending committed groups to remain outstanding: one exposes
+// QK(next) while PV(current) runs, and zero protects P/U reuse after PV completion.
 template <int Pending>
 __device__ __forceinline__ void warpgroup_wait() {
     asm volatile("wgmma.wait_group.sync.aligned %0;" :: "n"(Pending) : "memory");
@@ -214,6 +228,8 @@ __device__ __forceinline__ void wgmma_pv(float (&accumulator)[GROUPS][8], const 
         : "r"(A[0]), "r"(A[1]), "r"(A[2]), "r"(A[3]), "l"(B));
 }
 
+// Eight K16 instructions cover D128, reading four feature slices from each D64
+// band; each consumer owns 64 query rows and all 128 key columns of its scores.
 __device__ __forceinline__ void issue_qk(float (&scores)[GROUPS][8], SharedStorage& shared, int stage, int consumer) {
     fence_scores(scores);
     warpgroup_fence();
@@ -236,6 +252,8 @@ __device__ __forceinline__ void issue_qk(float (&scores)[GROUPS][8], SharedStora
     fence_scores(scores);
 }
 
+// Reduce 128 key positions through eight register/shared MMA steps, accumulating
+// the unnormalized output numerator across every D128 feature of each query row.
 __device__ __forceinline__ void issue_pv(float (&output)[GROUPS][8], uint32_t (&P)[GROUPS][4], SharedStorage& shared, int stage) {
     fence_scores(output);
     fence_probabilities(P);
@@ -270,11 +288,15 @@ __device__ __forceinline__ float fast_exp2(float value) {
     return result;
 }
 
+// Specialize the first diagonal tile and later full tiles at compile time;
+// causal traversal excludes future key tiles and applies element masks on the diagonal.
 template <bool First, bool Masked>
 __device__ __forceinline__ void online_softmax(float (&scores)[GROUPS][8], float (&row_max)[2], float (&row_sum)[2], float (&previous_scale)[2],
                                                int query_start, int key_start, int consumer_thread, float scale_log2) {
     const int lane = consumer_thread & 31;
     const int warp = consumer_thread >> 5;
+    // Each four-lane quad shares two row IDs; every lane owns 32 columns per row
+    // across eight groups, so XOR shuffles by 1 and 2 complete each row maximum.
     const int top_row = warp * 16 + lane / 4;
     const int bottom_row = top_row + 8;
     // Use four independent maximum chains per row fragment, then a tree merge.
@@ -361,6 +383,8 @@ __device__ __forceinline__ void online_softmax(float (&scores)[GROUPS][8], float
     for (int row = 0; row < 2; ++row) {
         local_sum[row] = (partial_sum[row][0] + partial_sum[row][1]) + (partial_sum[row][2] + partial_sum[row][3]);
     }
+    // Keep lane-local denominator contributions on the retained exponent base;
+    // finalize_rows performs the cross-lane sum once after all key tiles finish.
     row_sum[0] = (First ? 0.0F : row_sum[0] * previous_scale[0]) + local_sum[0];
     row_sum[1] = (First ? 0.0F : row_sum[1] * previous_scale[1]) + local_sum[1];
     row_max[0] = next_max[0];
@@ -402,7 +426,7 @@ __device__ __forceinline__ void store_output(SharedStorage& shared, float* lse, 
     const int row = (tid >> 5) * 16 + lane / 4;
     // Map four packed accumulator pairs to four 8x8 matrices.
     // stmatrix performs the register-to-SW128 retile
-    // collectively, replacing 32 scalar shared stores with eight instructions.
+    // collectively: eight warp-wide instructions place each lane's 64 BF16 outputs.
 #pragma unroll
     for (int g = 0; g < GROUPS; ++g) {
         uint32_t packed[4];
@@ -436,6 +460,8 @@ __global__ __launch_bounds__(NUM_THREADS) void flash_attention_forward_sm90_kern
     int section_heads, float scale) {
 #if defined(__CUDA_ARCH__) && __CUDA_ARCH__ >= 900
     extern __shared__ __align__(16) unsigned char storage[];
+    // Round the actual dynamic shared base to the SW128 layout's 1024-byte
+    // boundary; the launch reserves 1023 extra bytes to accommodate this padding.
     const uint32_t address = static_cast<uint32_t>(__cvta_generic_to_shared(storage));
     const uint32_t aligned = (address + SMEM_ALIGNMENT - 1) & ~(SMEM_ALIGNMENT - 1);
     auto& shared = *reinterpret_cast<SharedStorage*>(__cvta_shared_to_generic(aligned));
@@ -472,6 +498,8 @@ __global__ __launch_bounds__(NUM_THREADS) void flash_attention_forward_sm90_kern
     const int start = query_block * BM;
     const int head = head_batch % query_heads;
     const int batch = head_batch / query_heads;
+    // GQA/MQA map adjacent query heads to one KV head, with each Tensor Map
+    // retaining the physical head stride of its own Q or K/V allocation.
     const int kv_head = head / (query_heads / key_value_heads);
 
     // Warp specialization redistributes registers: producer 24, consumers 240.

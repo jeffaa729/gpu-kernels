@@ -88,7 +88,8 @@ __global__ void matmul_kernel(float* __restrict__ C, const float* __restrict__ A
     // stage 0 : cur/next A and B tile, stage 1: next/cur A and B tile
     // A is transposed to [K][M] for float4 reads;
     __shared__ float shared_A[2 * BK * kBM];
-    // B stays [K][N]. Logical layouts include an outer [stage] dimension.
+    // K-contiguous global B[N,K] is also scattered into shared [K][N].
+    // Both shared layouts include an outer [stage] dimension.
     __shared__ float shared_B[2 * BK * kBN];
 
     const int tid = threadIdx.x;
@@ -102,7 +103,7 @@ __global__ void matmul_kernel(float* __restrict__ C, const float* __restrict__ A
     const int lane_row = lane_id / 4;
     const int lane_column = lane_id % 4;
     // the beginning of a thread 8x8 output relative to the whole block output 128x128
-    // e.g. warp 0 : local row = 0, local col = 0, warp 31 : local row = 56, local col = 24
+    // In warp 0, lane 0 starts at row 0, column 0; lane 31 starts at row 56, column 24.
     const int local_row = warp_row * kWM + lane_row * kTM;
     const int local_column = warp_column * kWN + lane_column * kTN;
     // block output matrix 128x128 relative to the whole matrix
@@ -228,6 +229,8 @@ __global__ void matmul_kernel(float* __restrict__ C, const float* __restrict__ A
                 shared_B[index + 3 * kBN] = loaded_B[load].w;
             }
 
+            // Publish the next shared tile and finish every thread's current shared reads
+            // before that storage is recycled; the last current FMA uses registers.
             __syncthreads();
             const int loaded_stage = write_stage;
             write_stage ^= 1;
@@ -266,6 +269,8 @@ __global__ void matmul_kernel(float* __restrict__ C, const float* __restrict__ A
         }
     }
 
+    // Column-major C makes adjacent output rows contiguous, so each float4 store
+    // combines four row accumulators while the scalar path covers partial vectors.
 #pragma unroll
     for (int column = 0; column < kTN; ++column) {
         const int global_column = block_column + local_column + column;
@@ -318,6 +323,8 @@ __global__ __launch_bounds__(128, 3) void matmul_tensor_core_mma_kernel(__nv_bfl
     const int within_group = linear % (2 * gridDim.x);
     const int block_row = (first_row + within_group % group_rows) * 128;
     const int block_column = (within_group / group_rows) * 128;
+    // XOR permutes aligned eight-BF16 chunks across rows to spread ldmatrix bank
+    // accesses; asynchronous stores and matrix loads apply this same mapping.
     auto swizzle = [](int x) { return x ^ ((x & (3 << 6)) >> 3); };
     // Hoist lane-dependent address arithmetic out of the K loop. Because
     // shared is 128-byte aligned, a K8 slice changes only address bits 4/5.
@@ -339,9 +346,13 @@ __global__ __launch_bounds__(128, 3) void matmul_tensor_core_mma_kernel(__nv_bfl
         }
         asm volatile("cp.async.commit_group;" ::: "memory");
     };
+    // Prime the first K32 stage. Per-thread async-copy completion followed by a
+    // CTA barrier makes every producer's vectors available to all matrix loads.
     copy(0, 0);
     asm volatile("cp.async.wait_group 0;" ::: "memory");
     __syncthreads();
+    // A 64x64 warp tile uses four M16 by eight N8 fragments, with four FP32
+    // outputs per lane per fragment; K8 keeps each live A/B operand compact.
     float accumulators[4][8][4] = {};
     for (int tile = 0; tile < K / 32; ++tile) {
         // Load the next K32 tile while MMA consumes the current shared slot.
@@ -370,6 +381,8 @@ __global__ __launch_bounds__(128, 3) void matmul_tensor_core_mma_kernel(__nv_bfl
             }
         }
         if (tile + 1 < K / 32) {
+            // Complete the prefetched stage and rendezvous after current MMA reads
+            // before swapping the two slots' producer/consumer ownership.
             asm volatile("cp.async.wait_group 0;" ::: "memory");
             __syncthreads();
         }

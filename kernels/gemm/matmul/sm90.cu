@@ -43,8 +43,6 @@ static_assert(BM / NUM_CONSUMERS == WGMMA_M);
 static_assert(BK == 64 && BN == 256 && STAGES == 3);
 static_assert(BK % WGMMA_K == 0);
 
-// Matmul7 reuses this queue across logical output tiles assigned to one CTA.
-// Both operands are K-contiguous, matching fast.cu's A[M,K] and B[N,K].
 struct SharedStorage {
     alignas(SMEM_ALIGNMENT) bf16 A[STAGES][BM * BK];
     alignas(SMEM_ALIGNMENT) bf16 B[STAGES][BN * BK];
@@ -52,6 +50,8 @@ struct SharedStorage {
 };
 constexpr size_t SMEM_BYTES = sizeof(SharedStorage) + SMEM_ALIGNMENT - 1;
 
+// Encode the existing K-contiguous allocation as 64-BF16 bands, each 128 bytes
+// wide; TMA then produces the shared layout consumed by the WGMMA descriptor.
 template <int TileRows, int TileColumns, bool Swizzle = true>
 CUtensorMap make_tensor_map(const bf16* pointer, int rows, int columns) {
     CUtensorMap map;
@@ -89,6 +89,8 @@ __device__ __forceinline__ void barrier_arrive(uint64_t* bar) {
     asm volatile("mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];" :: "r"(barrier_address(bar)) : "memory");
 }
 
+// One producer arrival registers both operands' expected bytes; the Full phase
+// completes after that arrival and the associated TMA transactions complete.
 __device__ __forceinline__ void barrier_expect_bytes(uint64_t* bar, uint32_t bytes) {
     asm volatile("mbarrier.arrive.expect_tx.release.cta.shared::cta.b64 _, [%0], %1;"
                  :: "r"(barrier_address(bar)), "r"(bytes) : "memory");
@@ -123,6 +125,8 @@ __device__ __forceinline__ void tma_store(const CUtensorMap* map, bf16* src, int
         :: "l"(map), "r"(source), "r"(row), "r"(column / 64) : "memory");
 }
 
+// Advance through the three storage slots and flip parity on wraparound so
+// repeated uses of a barrier refer to the correct producer/consumer generation.
 __device__ __forceinline__ void advance_stage(int& stage, int& phase) {
     if (++stage == STAGES) {
         stage = 0;
@@ -145,14 +149,18 @@ __device__ __forceinline__ uint64_t make_smem_descriptor(bf16* pointer) {
     return descriptor;
 }
 
+// Order prior register accesses before asynchronous WGMMA operand use.
 __device__ __forceinline__ void warpgroup_fence() {
     asm volatile("wgmma.fence.sync.aligned;\n" ::: "memory");
 }
 
+// Commit the issued K16 operations as one group for subsequent completion waits.
 __device__ __forceinline__ void warpgroup_commit() {
     asm volatile("wgmma.commit_group.sync.aligned;\n" ::: "memory");
 }
 
+// Drain committed WGMMA work before reading accumulators or returning a shared
+// operand slot to the producer through its Empty barrier.
 __device__ __forceinline__ void warpgroup_wait() {
     asm volatile("wgmma.wait_group.sync.aligned 0;\n" ::: "memory");
 }
@@ -168,6 +176,8 @@ __device__ __forceinline__ void warpgroup_reg_dealloc() {
     asm volatile("setmaxnreg.dec.sync.aligned.u32 %0;\n" :: "n"(Count));
 }
 
+// Each warpgroup accumulates a 64x256 tile from shared BF16 operands into 128
+// FP32 registers per thread; ScaleD selects overwrite or accumulate behavior.
 template <int ScaleD, int ScaleA, int ScaleB, int TransA, int TransB>
 __device__ __forceinline__ void wgmma_m64n256k16(float (&accumulator)[16][8], bf16* A, bf16* B) {
     const uint64_t A_descriptor = make_smem_descriptor<16>(A);
@@ -215,7 +225,8 @@ __device__ __forceinline__ void wgmma_m64n256k16(float (&accumulator)[16][8], bf
             "n"(int32_t(ScaleB)), "n"(int32_t(TransA)), "n"(int32_t(TransB)));
 }
 
-// custom scheduler that hold a iteration counter, each block has to request multiple tiles
+// Persistent CTAs advance through a static grid-stride sequence of output tiles.
+// Grouping tiles in 16x8 neighborhoods encourages shared A/B reuse through L2.
 struct TileScheduler {
     int iteration;
     int tiles_m;
@@ -282,6 +293,8 @@ __global__ __launch_bounds__(NUM_THREADS) void gemm_bf16_kernel(const __grid_con
     if (warpgroup_id == 0) {
         warpgroup_reg_dealloc<24>();
         if (warpgroup_thread == 0) {
+            // Carry ring state across output tiles so input prefetch for the next
+            // tile can overlap the consumers' current output epilogue.
             int stage = 0, phase = 0;
             for (int tile_id = scheduler.next(); tile_id >= 0; tile_id = scheduler.next()) {
                 const int tile_m = tile_id / tiles_n;
@@ -302,6 +315,8 @@ __global__ __launch_bounds__(NUM_THREADS) void gemm_bf16_kernel(const __grid_con
     // Two consumers receive the register budget and own separate 64x256 row bands.
     warpgroup_reg_alloc<240>();
     const int consumer_id = warpgroup_id - 1;
+    // Both consumer leaders initially return every Empty slot; subsequent
+    // arrivals follow completed WGMMA reads and grant the next reuse cycle.
     for (int stage = 0; stage < STAGES; ++stage) {
         if (warpgroup_thread == 0) barrier_arrive(&empty[stage]);
     }
@@ -369,6 +384,8 @@ __global__ __launch_bounds__(NUM_THREADS) void gemm_bf16_kernel(const __grid_con
             STORE(row + 8, column + 9, accumulator[group][7]);
 #undef STORE
         }
+        // The 256 consumers rendezvous after filling both C row bands; one leader
+        // then commits the whole output store while the next tile's math proceeds.
         asm volatile("bar.sync 10, %0;" :: "n"(CONSUMER_THREADS) : "memory");
         if (threadIdx.x == PRODUCER_THREADS) {
             tma_store(&C_map, shared.C, tile_n * BN, tile_m * BM);
