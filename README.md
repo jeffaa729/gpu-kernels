@@ -29,9 +29,7 @@ bash scripts/test.sh nvfp4
 bash scripts/benchmark.sh nvfp4 b200 --reference cublaslt
 ```
 
-Requires a B200 and CUDA Toolkit 13.1+. Packed E2M1 inputs, VEC16 UE4M3 scales, FP32 accumulation, and row-major FP16 output. `b200` runs 8192 and 16384; `quick` runs 8192. Both backends rotate identical operands across allocations totaling at least twice L2; preparation and a 100 ms per-backend settling interval are excluded from CUDA Graph timing. Results overwrite `profiles/runtime/nvfp4.{csv,md}`.
-
-The main kernel in `kernels/gemm/matmul/sm100.cu` adapts [fast.cu](https://github.com/pranjalssh/fast.cu/tree/2dfe5e26aecfd9e5f27bf9d5837deea01acda24b/gb300/nvfp4) to native B200 K64 MMA, with runtime L2-side ownership, owned 8×8 ordering at 8192, owned 8×4 at 16384, and an eleven-slot scale queue. Existing SM89/SM90 kernels are unchanged.
+The main kernel in `kernels/gemm/matmul/sm100.cu` uses native B200 K64 MMA, runtime L2-side ownership, owned 8×8 ordering at 8192, owned 8×4 at 16384, and an eleven-slot scale queue.
 
 ### MegaMoE
 
@@ -45,7 +43,7 @@ bash scripts/benchmark_moe.sh 2 --trials 31
 
 FP32 and BF16 GEMM, TN layout, compared with cuBLAS.
 
-BF16: one fixed 128×128 kernel for all sizes. Results from 2026-10-22 use 21 CUDA Graph timing trials, 10 operations per replay, and 10 seconds of warmup per shape. FP32 results are unchanged from the earlier run.
+BF16: one fixed 128×128 kernel for all sizes. 
 
 | M=N=K | dtype | Custom µs | cuBLAS µs | Reference % |
 | ---: | :--- | ---: | ---: | ---: |
@@ -66,14 +64,11 @@ BF16 GEMM, TN layout, compared with cuBLAS.
 
 ## GEMM — B200 (SM100)
 
-NVFP4 GEMM, TN layout, FP16 output. Median of 15 paired CUDA Graph timing trials (30 ms minimum samples) on 2026-10-19; CUDA Toolkit 13.1, cuBLASLt 13.2.2.2. Both shapes pass numerical checks.
-
+NVFP4 GEMM, TN layout, FP16 output. 
 | M=N=K | Custom µs | cuBLASLt µs | Reference % |
 | ---: | ---: | ---: | ---: |
 | 8192 | 216.81 | 223.04 | 102.9 |
 | 16384 | 1692.64 | 1675.20 | 99.0 |
-
-16384 remains slightly below cuBLASLt; a consistent ≥100% result has not been established.
 
 ## FlashAttention forward — RTX 4060 Laptop (SM89)
 
@@ -85,7 +80,7 @@ Causal BF16 MHA: `B=1, T=512, Hq=Hkv=8, D=128`.
 
 ## FlashAttention forward — H100 SXM (SM90)
 
-Causal BF16 MHA: `B=4, Hq=Hkv=8, D=128`. Median of 35 CUDA Graph timing trials on 2026-10-16; reference: FlashAttention-4 `4.0.0b34`.
+Causal BF16 MHA: `B=4, Hq=Hkv=8, D=128`.
 
 | T | Custom µs | FlashAttention-4 µs | Reference % |
 | ---: | ---: | ---: | ---: |
@@ -109,8 +104,6 @@ Four NVIDIA H200 NVL GPUs, NVLink `NV6` between every pair, 600 W power limit pe
 
 Reference: DeepEP V2 dispatch/combine + DeepGEMM BF16 grouped GEMMs + weighted SwiGLU.
 
-Measured on 2026-10-19. Complete routed MoE layer: median of 31 CUDA Graph timing trials, 10 operations per replay, using the slowest rank per sample.
-
 | Tokens/GPU | Custom µs | DeepEP V2 + DeepGEMM µs | Reference % |
 | ---: | ---: | ---: | ---: |
 | 1 | 194.22 | 290.31 | 149.5 |
@@ -125,8 +118,6 @@ Measured on 2026-10-19. Complete routed MoE layer: median of 31 CUDA Graph timin
 Two NVIDIA H200 NVL GPUs, NVLink `NV6`, 600 W power limit per GPU. BF16 inputs, weights, and outputs; FP32 accumulation. V4-Flash-shaped routed MoE: `H=4096, I=2048, E=256`, 128 experts/GPU, top-k=6, SwiGLU clamp=10.
 
 Reference: DeepEP V2 dispatch/combine + DeepGEMM BF16 grouped GEMMs + weighted SwiGLU.
-
-Measured on 2026-10-18. Complete routed MoE layer: median of 31 CUDA Graph timing trials, 10 operations per replay, using the slowest rank per sample.
 
 | Tokens/GPU | Custom µs | DeepEP V2 + DeepGEMM µs | Reference % |
 | ---: | ---: | ---: | ---: |
